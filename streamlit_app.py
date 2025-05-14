@@ -3,22 +3,24 @@ import pandas as pd
 import numpy as np
 import requests
 
-# Load data only once
+# --- Load data only once ---
 @st.cache_data
 def load_data():
     return pd.read_csv("lake_health_data.csv")
 
+# --- Health score calculation ---
 def calculate_lake_health_score(df, vegetation_weight=1/6, barren_weight=1/6, urban_weight=1/6,
                                 precipitation_weight=1/6, evaporation_weight=1/6, air_temperature_weight=1/6):
-    df = df.copy()
-    df = df[df['Lake'].isin(df['Lake'].unique())]
+    
+    # Ensure numeric types
+    for col in ['Vegetation Area', 'Barren Area', 'Urban Area', 'Precipitation', 'Evaporation', 'Air Temperature']:
+        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
-    # Latest year data
     latest_year_data = df[df['Year'] == df['Year'].max()].copy()
     if latest_year_data.empty:
         return pd.DataFrame()
 
-    # Normalize level values
+    # Normalize latest values
     latest_year_data['Vegetation Area Normalized'] = (latest_year_data['Vegetation Area'] - latest_year_data['Vegetation Area'].min()) / (latest_year_data['Vegetation Area'].max() - latest_year_data['Vegetation Area'].min())
     latest_year_data['Barren Area Normalized'] = 1 - (latest_year_data['Barren Area'] - latest_year_data['Barren Area'].min()) / (latest_year_data['Barren Area'].max() - latest_year_data['Barren Area'].min())
     latest_year_data['Urban Area Normalized'] = 1 - (latest_year_data['Urban Area'] - latest_year_data['Urban Area'].min()) / (latest_year_data['Urban Area'].max() - latest_year_data['Urban Area'].min())
@@ -26,7 +28,7 @@ def calculate_lake_health_score(df, vegetation_weight=1/6, barren_weight=1/6, ur
     latest_year_data['Evaporation Normalized'] = 1 - (latest_year_data['Evaporation'] - latest_year_data['Evaporation'].min()) / (latest_year_data['Evaporation'].max() - latest_year_data['Evaporation'].min())
     latest_year_data['Air Temperature Normalized'] = 1 - (latest_year_data['Air Temperature'] - latest_year_data['Air Temperature'].min()) / (latest_year_data['Air Temperature'].max() - latest_year_data['Air Temperature'].min())
 
-    # Trend values
+    # Trends
     trends = df.groupby("Lake").apply(lambda x: pd.Series({
         'Vegetation Area Trend': np.polyfit(x['Year'], x['Vegetation Area'], 1)[0],
         'Barren Area Trend': np.polyfit(x['Year'], x['Barren Area'], 1)[0],
@@ -36,7 +38,7 @@ def calculate_lake_health_score(df, vegetation_weight=1/6, barren_weight=1/6, ur
         'Air Temperature Trend': np.polyfit(x['Year'], x['Air Temperature'], 1)[0]
     }))
 
-    # Normalize trend
+    # Normalize trends
     for col in trends.columns:
         if 'Barren' in col or 'Urban' in col or 'Evaporation' in col or 'Temperature' in col:
             trends[col + ' Normalized'] = 1 - (trends[col] - trends[col].min()) / (trends[col].max() - trends[col].min())
@@ -64,8 +66,9 @@ def calculate_lake_health_score(df, vegetation_weight=1/6, barren_weight=1/6, ur
     combined['Rank'] = combined['Health Score'].rank(ascending=False)
     return combined.reset_index()
 
+# --- GenAI Insight Function ---
 def get_insight_from_genai_api(lake_name, lake_data):
-    API_KEY = st.secrets["OPENROUTER_API_KEY"]  # Replace with your actual API key
+    API_KEY = st.secrets["OPENROUTER_API_KEY"]
     API_URL = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
         'Authorization': f'Bearer {API_KEY}',
@@ -92,11 +95,14 @@ def get_insight_from_genai_api(lake_name, lake_data):
     else:
         return "Failed to generate insight."
 
-# --- Streamlit UI ---
-st.title("Lake Health Scoring and Insights")
+# --- STREAMLIT UI ---
+st.title("Lake Health Scoring and GenAI Insights")
 
+# Load data
 data = load_data()
+data['Lake'] = data['Lake'].astype(str)  # ensure string comparison
 
+# Lake selection
 num_lakes = st.number_input("How many lakes do you want to compare?", min_value=1, step=1)
 lake_ids = []
 for i in range(num_lakes):
@@ -104,8 +110,15 @@ for i in range(num_lakes):
     if lake_id:
         lake_ids.append(lake_id)
 
+# Filter and calculate
 if lake_ids:
+    lake_ids = [str(lid) for lid in lake_ids]
     selected_df = data[data['Lake'].isin(lake_ids)]
+
+    # Debug info
+    st.write("Lake IDs Provided:", lake_ids)
+    st.write("Selected Data Shape:", selected_df.shape)
+
     results = calculate_lake_health_score(selected_df)
 
     if not results.empty:
