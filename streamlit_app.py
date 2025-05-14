@@ -65,7 +65,7 @@ def calculate_lake_health_score(df, vegetation_weight=1/6, barren_weight=1/6, ur
     return combined.reset_index()
 
 def get_insight_from_genai_api(lake_name, lake_data):
-    API_KEY = "xxxx"  # Replace with your actual API key
+    API_KEY = st.secrets["OPENROUTER_API_KEY"]  # Replace with your actual API key
     API_URL = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
         'Authorization': f'Bearer {API_KEY}',
