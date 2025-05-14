@@ -6,7 +6,7 @@ import requests
 # Load data only once
 @st.cache_data
 def load_data():
-    return pd.read_csv("lake_5.csv")
+    return pd.read_csv("lake_health_data.csv")
 
 def calculate_lake_health_score(df, vegetation_weight=1/6, barren_weight=1/6, urban_weight=1/6,
                                 precipitation_weight=1/6, evaporation_weight=1/6, air_temperature_weight=1/6):
