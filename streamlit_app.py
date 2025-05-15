@@ -81,7 +81,7 @@ def get_insight_from_genai_api(lake_name, lake_data):
     Vegetation Area: {lake_data['Vegetation Area']}, Barren Area: {lake_data['Barren Area']}, Urban Area: {lake_data['Urban Area']}, 
     Precipitation: {lake_data['Precipitation']}, Evaporation: {lake_data['Evaporation']}, Air Temperature: {lake_data['Air Temperature']},
     and their respective trends and normalized values.
-    Provide a short reasoning.
+    Provide a long reasoning.
     """
 
     data = {
@@ -125,14 +125,27 @@ if lake_ids:
         st.subheader("Lake Health Scores")
         st.dataframe(results[['Lake', 'Health Score', 'Rank']])
 
+        
         st.subheader("AI Insights")
         for _, row in results.iterrows():
             with st.expander(f"Insight for {row['Lake']}"):
                 lake_data = selected_df[selected_df['Lake'] == row['Lake']].iloc[-1].to_dict()
                 lake_data.update(row.to_dict())
                 insight = get_insight_from_genai_api(row['Lake'], lake_data)
+                st.markdown("**AI Insight:**")
                 st.write(insight)
-
+                st.markdown("**Time Series Plot:**")
+                lake_timeseries = selected_df[selected_df['Lake'] == row['Lake']].sort_values("Year")
+                st.line_chart(
+                    lake_timeseries.set_index("Year")[[
+                        "Vegetation Area",
+                        "Barren Area",
+                        "Urban Area",
+                        "Precipitation",
+                        "Evaporation",
+                        "Air Temperature"
+                    ]]
+                )
         # CSV Download
         csv = selected_df.to_csv(index=False).encode('utf-8')
         st.download_button("Download Selected Lake Data as CSV", data=csv, file_name="selected_lake_data.csv", mime='text/csv')
