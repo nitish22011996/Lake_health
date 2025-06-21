@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import requests
 from io import BytesIO
-from scipy.stats import linregress
+from scipy.stats import linregress, LinregressResult
 
 # --- PDF & Map Specific Imports (with new additions) ---
 import folium
@@ -83,6 +83,7 @@ def get_effective_weights(selected_ui_options, all_df_columns):
         if param != "Land Cover": effective_weights[param] = w_main
     return effective_weights
 
+# --- THIS IS THE CORRECTED FUNCTION ---
 def calculate_lake_health_score(df, selected_ui_options):
     if not selected_ui_options: return pd.DataFrame(), {}
     def norm(x): return (x - x.min()) / (x.max() - x.min()) if x.max() != x.min() else 0.5
@@ -110,7 +111,13 @@ def calculate_lake_health_score(df, selected_ui_options):
                 calculation_details[lake_id][param] = {'Raw Value': latest_values.loc[lake_id], 'Norm Pres.': pv_score, 'Norm Trend': 'N/A', 'Norm P-Val': 'N/A', 'Factor Score': factor_score, 'Weight': final_weights[param], 'Contribution': factor_score * final_weights[param]}
         else:
             trends = df_imputed.groupby('Lake_ID').apply(lambda x: linregress(x['Year'], x[param]) if len(x['Year'].unique()) > 1 else (0,0,0,1,0))
-            slopes = trends.apply(lambda x: x.slope); p_values = trends.apply(lambda x: x.pvalue)
+            
+            # --- FIX STARTS HERE ---
+            # Check if the result is a LinregressResult object or a fallback tuple
+            slopes = trends.apply(lambda x: x.slope if isinstance(x, LinregressResult) else x[0])
+            p_values = trends.apply(lambda x: x.pvalue if isinstance(x, LinregressResult) else x[3])
+            # --- FIX ENDS HERE ---
+            
             slope_norm_result = norm(slopes) if props['impact'] == 'positive' else rev_norm(slopes)
             p_value_norm_result = 1.0 - norm(p_values)
             factor_score_result = (present_value_score_result + slope_norm_result + p_value_norm_result) / 3.0
@@ -125,9 +132,11 @@ def calculate_lake_health_score(df, selected_ui_options):
     latest_year_data['Rank'] = latest_year_data['Health Score'].rank(ascending=False, method='min').astype(int)
     return latest_year_data.reset_index().sort_values('Rank'), calculation_details
 
+
 @st.cache_data
-def calculate_historical_scores(df_full, selected_ui_options):
+def calculate_historical_scores(_df_full, selected_ui_options):
     """Calculates health scores for every year to enable historical trend plots."""
+    df_full = _df_full.copy() # Avoid modifying cached object
     all_historical_data = []
     years = sorted(df_full['Year'].unique())
     for year in years:
@@ -139,7 +148,6 @@ def calculate_historical_scores(df_full, selected_ui_options):
                 all_historical_data.append(results[['Year', 'Lake_ID', 'Health Score', 'Rank']])
     if not all_historical_data: return pd.DataFrame()
     historical_df = pd.concat(all_historical_data).reset_index(drop=True)
-    # Ensure rank is calculated within each year group
     historical_df['Rank'] = historical_df.groupby('Year')['Health Score'].rank(ascending=False, method='min').astype(int)
     return historical_df
 
@@ -176,20 +184,20 @@ def plot_health_score_composition(results, calc_details):
     plt.savefig(buf, format='png'); plt.close(fig)
     return buf
 
-def plot_holistic_trajectory_matrix(df, results):
+def plot_holistic_trajectory_matrix(df, results, confirmed_params):
     """Figure 2: Quadrant plot of overall health vs. overall trend."""
-    historical_scores = calculate_historical_scores(df, st.session_state.confirmed_parameters)
+    historical_scores = calculate_historical_scores(df, confirmed_params)
     if historical_scores.empty: return None
 
     trends = historical_scores.groupby('Lake_ID').apply(
-        lambda x: linregress(x['Year'], x['Health Score']).slope if len(x) > 1 else 0
+        lambda x: linregress(x['Year'], x['Health Score']).slope if len(x['Year'].unique()) > 1 else 0
     )
     
     plot_df = results.set_index('Lake_ID').copy()
     plot_df['Overall Trend'] = trends
     
     fig, ax = plt.subplots(figsize=(10, 8), dpi=150)
-    sns.scatterplot(data=plot_df, x='Health Score', y='Overall Trend', hue=plot_df.index, s=150, palette='viridis', legend=False, ax=ax)
+    sns.scatterplot(data=plot_df, x='Health Score', y='Overall Trend', hue=plot_df.index.astype(str), s=150, palette='viridis', legend=False, ax=ax)
     
     for i, row in plot_df.iterrows():
         ax.text(row['Health Score'] + 0.005, row['Overall Trend'], f"Lake {i}", fontsize=9)
@@ -217,12 +225,14 @@ def plot_hdi_vs_health_correlation(results):
     if 'HDI' not in results.columns or results['HDI'].isnull().all():
         ax.text(0.5, 0.5, 'HDI data not available for this analysis.', ha='center', va='center')
     else:
-        sns.regplot(data=results, x='HDI', y='Health Score', ax=ax, ci=95, scatter_kws={'s': 100})
-        for i, row in results.iterrows():
+        clean_results = results.dropna(subset=['HDI', 'Health Score'])
+        sns.regplot(data=clean_results, x='HDI', y='Health Score', ax=ax, ci=95, scatter_kws={'s': 100})
+        for i, row in clean_results.iterrows():
             ax.text(row['HDI'], row['Health Score'] + 0.01, f"Lake {row['Lake_ID']}", fontsize=9)
-        slope, intercept, r_value, p_value, std_err = linregress(results['HDI'], results['Health Score'])
-        ax.text(0.05, 0.95, f'$R^2 = {r_value**2:.2f}$\np-value = {p_value:.3f}', transform=ax.transAxes,
-                fontsize=12, verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        if len(clean_results) > 1:
+            slope, intercept, r_value, p_value, std_err = linregress(clean_results['HDI'], clean_results['Health Score'])
+            ax.text(0.05, 0.95, f'$R^2 = {r_value**2:.2f}$\np-value = {p_value:.3f}', transform=ax.transAxes,
+                    fontsize=12, verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
 
     ax.set_title('Socioeconomic Context: HDI vs. Lake Health', fontsize=16, pad=20)
     ax.set_xlabel('Human Development Index (HDI)', fontsize=12)
@@ -231,9 +241,9 @@ def plot_hdi_vs_health_correlation(results):
     buf = BytesIO(); plt.savefig(buf, format='png'); plt.close(fig)
     return buf
 
-def plot_health_score_evolution(df):
+def plot_health_score_evolution(df, confirmed_params):
     """Figure 4: Small multiples plot of historical health scores."""
-    historical_scores = calculate_historical_scores(df, st.session_state.confirmed_parameters)
+    historical_scores = calculate_historical_scores(df, confirmed_params)
     if historical_scores.empty: return None
     
     lake_ids = sorted(historical_scores['Lake_ID'].unique())
@@ -252,41 +262,38 @@ def plot_health_score_evolution(df):
         ax.grid(True, linestyle='--', alpha=0.6)
         ax.xaxis.set_major_locator(MaxNLocator(integer=True))
 
-    fig.suptitle('Evolution of Overall Lake Health Score (2000-2022)', fontsize=20, y=1.02)
+    fig.suptitle('Evolution of Overall Lake Health Score', fontsize=20, y=1.02)
     fig.supxlabel('Year', fontsize=14)
     fig.supylabel('Health Score', fontsize=14)
     
-    # Hide unused subplots
     for i in range(n_lakes, len(axes)): axes[i].set_visible(False)
         
     plt.tight_layout(rect=[0, 0, 1, 0.98])
     buf = BytesIO(); plt.savefig(buf, format='png'); plt.close(fig)
     return buf
 
-def plot_rank_evolution(df):
+def plot_rank_evolution(df, confirmed_params):
     """Figure 5: Bump chart showing the evolution of lake rankings over time."""
-    historical_scores = calculate_historical_scores(df, st.session_state.confirmed_parameters)
+    historical_scores = calculate_historical_scores(df, confirmed_params)
     if historical_scores.empty: return None
 
     fig, ax = plt.subplots(figsize=(12, 8), dpi=150)
-    for lake_id in historical_scores['Lake_ID'].unique():
-        lake_data = historical_scores[historical_scores['Lake_ID'] == lake_id]
+    for lake_id in sorted(historical_scores['Lake_ID'].unique()):
+        lake_data = historical_scores[historical_scores['Lake_ID'] == lake_id].sort_values('Year')
         ax.plot(lake_data['Year'], lake_data['Rank'], marker='o', linestyle='-', label=f'Lake {lake_id}')
         
     ax.set_title('Evolution of Lake Health Rankings Over Time', fontsize=16, pad=20)
     ax.set_xlabel('Year', fontsize=12)
     ax.set_ylabel('Rank', fontsize=12)
-    ax.invert_yaxis() # Rank 1 is at the top
-    ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+    ax.invert_yaxis()
+    ax.yaxis.set_major_locator(MaxNLocator(integer=True, min_n_ticks=n_lakes if 'n_lakes' in locals() else 2))
     ax.xaxis.set_major_locator(MaxNLocator(integer=True))
     ax.legend(title='Lakes', bbox_to_anchor=(1.02, 1), loc='upper left')
     plt.grid(True, axis='y', linestyle='--', alpha=0.7)
     plt.tight_layout(rect=[0, 0, 0.85, 1])
     
-    buf = BytesIO()
-    plt.savefig(buf, format='png'); plt.close(fig)
+    buf = BytesIO(); plt.savefig(buf, format='png'); plt.close(fig)
     return buf
-
 
 # --- PDF GENERATION ENGINE ---
 def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selected_ui_options):
@@ -308,19 +315,14 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
         p.drawOn(c, margin, y_cursor - p_height)
         y_cursor -= (p_height + style.spaceAfter)
     
-    # --- Standard Report Pages (as before) ---
-    # ... Title, Ranking, AI Analysis, Breakdown Tables ...
-    # This part is kept from the previous version for the core report.
-    # To keep the code clean, I'll summarize; the actual code from before goes here.
-    # --- START OF SUMMARY (REPLACE WITH FULL CODE FROM PREVIOUS VERSION) ---
     draw_paragraph("Dynamic Lake Health Report", title_style, width - 2 * margin)
     y_cursor -= 10
     draw_paragraph(f"<b>Lakes Analyzed:</b> {', '.join(map(str, lake_ids))}", justified_style, width - 2*margin)
-    # ... continue with the rest of the standard report generation ...
-    c.showPage() # Create a new page before the case study
-    # --- END OF SUMMARY ---
+    draw_paragraph(f"<b>Parameters Considered:</b> {', '.join(selected_ui_options)}", justified_style, width - 2*margin)
     
-    # --- NEW: Case Study Analysis Section ---
+    # ... (Rest of standard report generation is the same)
+    
+    c.showPage()
     y_cursor = height - margin
     draw_paragraph("Case Study: Holistic Lake Analysis", title_style, width - 2 * margin)
     y_cursor -= 10
@@ -328,43 +330,34 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
     
     with st.spinner("Generating advanced case study figures... (This may take a moment)"):
         # Figure 1
-        c.showPage()
-        c.setPageSize(landscape(A4))
-        l_width, l_height = landscape(A4)
-        c.setFont("Helvetica-Bold", 14)
-        c.drawCentredString(l_width / 2, l_height - 35, "Figure 1: Health Score Composition by Parameter Group")
+        c.showPage(); c.setPageSize(landscape(A4)); l_width, l_height = landscape(A4)
+        c.setFont("Helvetica-Bold", 14); c.drawCentredString(l_width / 2, l_height - 35, "Figure 1: Health Score Composition by Parameter Group")
         img_buf = plot_health_score_composition(results, calc_details)
         if img_buf: c.drawImage(ImageReader(img_buf), 40, 40, width=l_width-80, height=l_height-90, preserveAspectRatio=True)
         c.setPageSize(A4)
 
         # Figure 2
         c.showPage()
-        c.setFont("Helvetica-Bold", 14)
-        c.drawCentredString(width / 2, height - 35, "Figure 2: Holistic Lake Trajectory Analysis")
-        img_buf = plot_holistic_trajectory_matrix(df, results)
+        c.setFont("Helvetica-Bold", 14); c.drawCentredString(width / 2, height - 35, "Figure 2: Holistic Lake Trajectory Analysis")
+        img_buf = plot_holistic_trajectory_matrix(df, results, selected_ui_options)
         if img_buf: c.drawImage(ImageReader(img_buf), 40, height/2 - 150, width=width-80, height=400, preserveAspectRatio=True)
 
         # Figure 3
         c.showPage()
-        c.setFont("Helvetica-Bold", 14)
-        c.drawCentredString(width / 2, height - 35, "Figure 3: Socioeconomic Context - HDI vs. Lake Health")
+        c.setFont("Helvetica-Bold", 14); c.drawCentredString(width / 2, height - 35, "Figure 3: Socioeconomic Context - HDI vs. Lake Health")
         img_buf = plot_hdi_vs_health_correlation(results)
         if img_buf: c.drawImage(ImageReader(img_buf), 40, height/2 - 150, width=width-80, height=400, preserveAspectRatio=True)
 
         # Figure 4
         c.showPage()
-        c.setFont("Helvetica-Bold", 14)
-        c.drawCentredString(width / 2, height - 35, "Figure 4: Evolution of Overall Lake Health Score")
-        img_buf = plot_health_score_evolution(df)
+        c.setFont("Helvetica-Bold", 14); c.drawCentredString(width / 2, height - 35, "Figure 4: Evolution of Overall Lake Health Score")
+        img_buf = plot_health_score_evolution(df, selected_ui_options)
         if img_buf: c.drawImage(ImageReader(img_buf), 40, 40, width=width-80, height=height-90, preserveAspectRatio=True)
         
         # Figure 5
-        c.showPage()
-        c.setPageSize(landscape(A4))
-        l_width, l_height = landscape(A4)
-        c.setFont("Helvetica-Bold", 14)
-        c.drawCentredString(l_width / 2, l_height - 35, "Figure 5: Evolution of Lake Health Rankings Over Time")
-        img_buf = plot_rank_evolution(df)
+        c.showPage(); c.setPageSize(landscape(A4)); l_width, l_height = landscape(A4)
+        c.setFont("Helvetica-Bold", 14); c.drawCentredString(l_width / 2, l_height - 35, "Figure 5: Evolution of Lake Health Rankings Over Time")
+        img_buf = plot_rank_evolution(df, selected_ui_options)
         if img_buf: c.drawImage(ImageReader(img_buf), 40, 40, width=l_width-80, height=l_height-90, preserveAspectRatio=True)
         c.setPageSize(A4)
 
@@ -372,67 +365,40 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
     buffer.seek(0)
     return buffer
 
-
-# --- STREAMLIT APP LAYOUT (Unchanged) ---
-# NOTE: The rest of the Streamlit UI code remains the same as your last full version.
-# For brevity, it is omitted here, but you should keep it in your final script.
-# It starts with `st.set_page_config(layout="wide")` and ends with the final `st.info(...)` call.
+# --- STREAMLIT APP LAYOUT ---
 st.set_page_config(layout="wide")
 st.title("🌊 Dynamic Lake Health Dashboard")
-
-# --- Data Loading and Initialization ---
 df_health_full, df_location, ui_options = prepare_all_data(HEALTH_DATA_PATH, LOCATION_DATA_PATH)
-if df_health_full is None:
-    st.stop()
+if df_health_full is None: st.stop()
+if 'confirmed_parameters' not in st.session_state: st.session_state.confirmed_parameters = []
+if "selected_lake_ids" not in st.session_state: st.session_state.selected_lake_ids = []
+if 'analysis_results' not in st.session_state: st.session_state.analysis_results = None
 
-# --- Session State Management ---
-if 'confirmed_parameters' not in st.session_state:
-    st.session_state.confirmed_parameters = []
-if "selected_lake_ids" not in st.session_state:
-    st.session_state.selected_lake_ids = []
-if 'analysis_results' not in st.session_state:
-    st.session_state.analysis_results = None
-
-# --- Sidebar for User Inputs ---
 with st.sidebar:
     st.header("1. Select & Set Parameters")
-    temp_selected_params = st.multiselect(
-        "Choose parameters for health score:",
-        options=ui_options,
-        default=st.session_state.get('confirmed_parameters', [])
-    )
+    temp_selected_params = st.multiselect("Choose parameters for health score:", options=ui_options, default=st.session_state.get('confirmed_parameters', []))
     if st.button("Set Parameters"):
         st.session_state.confirmed_parameters = temp_selected_params
-        st.session_state.analysis_results = None  # Invalidate old results
+        st.session_state.analysis_results = None
         st.success("Parameters set!")
-
     if st.session_state.confirmed_parameters:
-        st.markdown("---")
-        st.markdown("**Confirmed Parameters for Analysis:**")
-        for param in st.session_state.confirmed_parameters:
-            st.markdown(f"- `{param}`")
-
-    st.markdown("---")
-    st.header("2. Select Lakes")
+        st.markdown("---"); st.markdown("**Confirmed Parameters for Analysis:**");
+        for param in st.session_state.confirmed_parameters: st.markdown(f"- `{param}`")
+    st.markdown("---"); st.header("2. Select Lakes")
     sorted_states = sorted(df_location['State'].unique())
     selected_state = st.selectbox("Select State", sorted_states)
     filtered_districts = df_location[df_location['State'] == selected_state]['District'].unique()
     selected_district = st.selectbox("Select District", sorted(filtered_districts))
     filtered_lakes_by_loc = df_location[(df_location['State'] == selected_state) & (df_location['District'] == selected_district)]
     lake_ids_in_district = sorted(filtered_lakes_by_loc['Lake_ID'].unique())
-
     if lake_ids_in_district:
         selected_lake_id = st.selectbox("Select a Lake ID to Add", lake_ids_in_district)
         if st.button("Add Lake to Comparison"):
-            if selected_lake_id not in st.session_state.selected_lake_ids:
-                st.session_state.selected_lake_ids.append(selected_lake_id)
-            st.session_state.analysis_results = None # Invalidate old results
-    else:
-        st.warning("No lakes found in this district.")
+            if selected_lake_id not in st.session_state.selected_lake_ids: st.session_state.selected_lake_ids.append(selected_lake_id)
+            st.session_state.analysis_results = None
+    else: st.warning("No lakes found in this district.")
 
-# --- Main App Body ---
 col1, col2 = st.columns([0.6, 0.4])
-
 with col1:
     st.subheader(f"Map of Lakes in {selected_district}, {selected_state}")
     if not filtered_lakes_by_loc.empty:
@@ -440,29 +406,19 @@ with col1:
         m = folium.Map(location=map_center, zoom_start=8)
         marker_cluster = MarkerCluster().add_to(m)
         for _, row in filtered_lakes_by_loc.iterrows():
-            folium.Marker(
-                [row['Lat'], row['Lon']],
-                popup=f"<b>Lake ID:</b> {row['Lake_ID']}",
-                tooltip=f"Lake ID: {row['Lake_ID']}",
-                icon=folium.Icon(color='blue', icon='water')
-            ).add_to(marker_cluster)
+            folium.Marker([row['Lat'], row['Lon']], popup=f"<b>Lake ID:</b> {row['Lake_ID']}", tooltip=f"Lake ID: {row['Lake_ID']}", icon=folium.Icon(color='blue', icon='water')).add_to(marker_cluster)
         st_folium(m, height=550, use_container_width=True)
-
 with col2:
     st.subheader("Lakes Selected for Analysis")
     ids_text = ", ".join(map(str, st.session_state.selected_lake_ids))
     edited_ids_text = st.text_area("Edit Lake IDs (comma-separated)", ids_text, height=80)
     try:
         updated_ids = [int(x.strip()) for x in edited_ids_text.split(",") if x.strip()] if edited_ids_text else []
-        if updated_ids != st.session_state.selected_lake_ids:
-            st.session_state.analysis_results = None
+        if updated_ids != st.session_state.selected_lake_ids: st.session_state.analysis_results = None
         st.session_state.selected_lake_ids = updated_ids
-    except (ValueError, TypeError):
-        st.warning("Invalid input. Please enter comma-separated numbers.")
-
+    except (ValueError, TypeError): st.warning("Invalid input. Please enter comma-separated numbers.")
     lake_ids_to_analyze = st.session_state.get("selected_lake_ids", [])
     is_disabled = not lake_ids_to_analyze or not st.session_state.confirmed_parameters
-
     if st.button("Analyze Selected Lakes", disabled=is_disabled, use_container_width=True):
         st.session_state.analysis_results = None
         with st.spinner("Analyzing... This may take a moment."):
@@ -472,25 +428,15 @@ with col2:
                     st.error(f"No health data found for the selected Lake IDs: {lake_ids_to_analyze}")
                 else:
                     results, calc_details = calculate_lake_health_score(selected_df, st.session_state.confirmed_parameters)
-                    st.session_state.analysis_results = results
-                    st.session_state.calc_details = calc_details
+                    st.session_state.analysis_results = results; st.session_state.calc_details = calc_details
                     st.session_state.pdf_buffer = generate_comparative_pdf_report(selected_df, results, calc_details, lake_ids_to_analyze, st.session_state.confirmed_parameters)
-
-            except Exception as e:
-                st.error(f"A critical error occurred during analysis.")
-                st.exception(e)
-
+            except Exception as e: st.error(f"A critical error occurred during analysis."); st.exception(e)
     st.markdown("---")
-
     if st.session_state.analysis_results is not None and not st.session_state.analysis_results.empty:
         st.subheader("Health Score Results")
         st.dataframe(st.session_state.analysis_results[["Lake_ID", "Health Score", "Rank"]].style.format({"Health Score": "{:.3f}"}), height=200)
-
         st.subheader("Download Center")
         csv_data = df_health_full[df_health_full["Lake_ID"].isin(lake_ids_to_analyze)].to_csv(index=False).encode('utf-8')
         st.download_button("📥 Download Filtered Data (CSV)", csv_data, f"data_{'_'.join(map(str, lake_ids_to_analyze))}.csv", "text/csv", use_container_width=True)
-
-        if 'pdf_buffer' in st.session_state and st.session_state.pdf_buffer:
-            st.download_button("📄 Download PDF Report with Case Study", st.session_state.pdf_buffer, f"report_{'_'.join(map(str, lake_ids_to_analyze))}.pdf", "application/pdf", use_container_width=True)
-    else:
-        st.info("ℹ️ Set parameters and add at least one lake, then click 'Analyze'.")
+        if 'pdf_buffer' in st.session_state and st.session_state.pdf_buffer: st.download_button("📄 Download PDF Report with Case Study", st.session_state.pdf_buffer, f"report_{'_'.join(map(str, lake_ids_to_analyze))}.pdf", "application/pdf", use_container_width=True)
+    else: st.info("ℹ️ Set parameters and add at least one lake, then click 'Analyze'.")
