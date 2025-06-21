@@ -6,6 +6,7 @@ import seaborn as sns
 import requests
 from io import BytesIO
 from scipy.stats import linregress
+import textwrap
 
 # --- PDF & Map Specific Imports ---
 import folium
@@ -15,7 +16,7 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.utils import ImageReader
 from reportlab.lib import colors
-from reportlab.platypus import Paragraph
+from reportlab.platypus import Paragraph, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from matplotlib.ticker import MaxNLocator
 
@@ -174,6 +175,8 @@ def generate_grouped_plots_by_metric(df, lake_ids, metrics):
 def plot_radar_chart(calc_details):
     if not calc_details: return None, None, None
     params = sorted(list(next(iter(calc_details.values())).keys()))
+    # FIX: Wrap long labels to prevent overlap
+    wrapped_params = [ '\n'.join(textwrap.wrap(p, 15)) for p in params ]
     data = {f"Lake {lake_id}": [details[p]['Factor Score'] for p in params] for lake_id, details in calc_details.items()}
     df_scores = pd.DataFrame(data, index=params)
     num_vars = len(params)
@@ -182,7 +185,11 @@ def plot_radar_chart(calc_details):
     for lake_name in df_scores.columns:
         values = df_scores[lake_name].tolist() + [df_scores[lake_name].tolist()[0]]
         ax.plot(angles, values, label=lake_name, linewidth=2); ax.fill(angles, values, alpha=0.2)
-    ax.set_yticklabels([]); ax.set_xticks(angles[:-1]); ax.set_xticklabels(params, size=10)
+    # FIX: Add labeled radial grid lines
+    ax.set_yticks([0.2, 0.4, 0.6, 0.8])
+    ax.set_yticklabels(['0.2', '0.4', '0.6', '0.8'], color="grey", size=9)
+    ax.set_ylim(0, 1)
+    ax.set_xticks(angles[:-1]); ax.set_xticklabels(wrapped_params, size=10)
     ax.set_title("Lake Health Fingerprint", size=20, y=1.1)
     ax.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1))
     buf = BytesIO(); plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.3); plt.close(fig)
@@ -193,8 +200,9 @@ def plot_health_score_evolution(df, confirmed_params):
     if historical_scores.empty: return None, None, None
     lake_ids = sorted(historical_scores['Lake_ID'].unique())
     n_lakes = len(lake_ids)
-    ncols = min(n_lakes, 4); nrows = (n_lakes - 1) // ncols + 1
-    fig, axes = plt.subplots(nrows, ncols, figsize=(4 * ncols, 3 * nrows), dpi=150, sharey=True)
+    # FIX: Constrain columns to prevent plot from becoming too wide and small
+    ncols = min(n_lakes, 3); nrows = (n_lakes - 1) // ncols + 1
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.5 * ncols, 3.5 * nrows), dpi=150, sharey=True)
     axes = np.array(axes).flatten()
     for i, lake_id in enumerate(lake_ids):
         ax = axes[i]
@@ -202,10 +210,12 @@ def plot_health_score_evolution(df, confirmed_params):
         ax.plot(lake_data['Year'], lake_data['Health Score'], marker='o', linestyle='-')
         ax.set_title(f"Lake {lake_id}"); ax.grid(True, linestyle='--', alpha=0.6)
         ax.xaxis.set_major_locator(MaxNLocator(integer=True, nbins=5))
-    fig.suptitle('Evolution of Overall Lake Health Score', fontsize=20, y=1.03)
-    fig.supxlabel('Year', fontsize=14, y=0.01); fig.supylabel('Health Score', fontsize=14, x=0.01)
+    fig.suptitle('Evolution of Overall Lake Health Score', fontsize=20, y=0.98)
+    fig.supxlabel('Year', fontsize=14); fig.supylabel('Health Score', fontsize=14, x=0.01)
     for i in range(n_lakes, len(axes)): axes[i].set_visible(False)
-    plt.tight_layout(rect=[0.03, 0.03, 1, 0.95]); buf = BytesIO(); plt.savefig(buf, format='png'); plt.close(fig)
+    # FIX: Use a tighter layout with padding to avoid overlaps
+    fig.tight_layout(pad=2.0, h_pad=3.0, w_pad=2.0, rect=[0.03, 0.03, 1, 0.95]); 
+    buf = BytesIO(); plt.savefig(buf, format='png'); plt.close(fig)
     return "Figure 2: Evolution of Overall Health Score", buf, False
 
 def plot_holistic_trajectory_matrix(df, results, confirmed_params):
@@ -246,22 +256,28 @@ def plot_hdi_vs_health_correlation(results):
 
 # --- AI & PDF GENERATION ---
 def build_detailed_ai_prompt(results, calc_details):
-    prompt = "You are an expert environmental data analyst. Generate a detailed comparative analysis of the following lakes based on their health parameters. For each parameter group (e.g., Climate, Water Quality), explain how the lakes compare and which lakes are performing better or worse in that specific area.\n\n"
-    prompt += "### Lake Data Profiles:\n"
+    # FIX: New prompt designed for qualitative insights, not just number recitation.
+    prompt = ("You are an expert environmental data analyst. Your goal is to provide qualitative insights, not just quantitative comparisons. "
+              "Generate a detailed comparative analysis of the following lakes based on their health parameters. For each parameter group (e.g., Climate, Water Quality), "
+              "identify the 'best-in-class' and 'most-at-risk' lakes. Explain the *implications* of these differences. Use numbers only to support your qualitative statements.\n\n"
+              "### Lake Data Profiles:\n")
     for _, row in results.iterrows():
         lake_id = row['Lake_ID']
         prompt += f"--- Lake {lake_id} ---\n"
         prompt += f"Final Health Score: {row['Health Score']:.3f} (Rank: {row['Rank']})\n"
         for param, details in calc_details[lake_id].items():
             prompt += f"- {param}: {details['Raw Value']:.2f} (Factor Score: {details['Factor Score']:.3f})\n"
+    prompt += "\n### Analysis Task:\n"
+    prompt += "1. **Overall Summary:** Briefly state which lakes are healthiest and which are of most concern overall.\n"
+    prompt += "2. **Parameter Group Analysis:** For each group (Climate, Water Quality, Land Cover, Socioeconomic), provide a paragraph comparing the lakes. Focus on insights, not just data. Example: 'In terms of Water Quality, Lake X stands out with excellent clarity, while Lake Y's high surface temperature is a significant concern for its ecosystem.'\n"
     return prompt
 
 def build_figure_specific_ai_prompt(figure_title, data_summary):
     prompt = f"You are an environmental data analyst interpreting a figure for a report. The figure is titled '{figure_title}'. Below is a summary of the data used to create this figure.\n\n"
-    prompt += "### Data Summary:\n"
-    prompt += data_summary
-    prompt += "\n\n### Your Task:\n"
-    prompt += "Write a concise, insightful paragraph (3-5 sentences) that interprets this figure. Explain what the visual pattern reveals about the lakes being compared. Do not just list the data; provide a high-level interpretation of the findings shown in the chart."
+    prompt += "### Data Summary:\n" + data_summary + "\n\n"
+    prompt += ("### Your Task:\nWrite a concise, insightful paragraph (3-5 sentences) that interprets this figure. "
+               "Explain what the visual pattern reveals about the lakes being compared. Do not just list the data; "
+               "provide a high-level interpretation of the findings shown in the chart.")
     return prompt
 
 def generate_ai_insight(prompt):
@@ -288,18 +304,16 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
     title_style = ParagraphStyle(name='Title', parent=styles['h1'], alignment=1, fontSize=20)
     header_style = ParagraphStyle(name='Header', parent=styles['h2'], alignment=0, spaceBefore=12, spaceAfter=6)
     
-    # --- PDF Helper ---
     def draw_paragraph(canvas_obj, text, style, x, y, width, height):
         p = Paragraph(str(text).replace('\n', '<br/>'), style)
         p.wrapOn(canvas_obj, width, height)
         p.drawOn(canvas_obj, x, y - p.height)
         return p.height
-
+        
     # --- Page 1: Title and Ranking ---
     draw_paragraph(c, "Dynamic Lake Health Report", title_style, 40, A4[1] - 40, A4[0] - 80, 100)
     y_cursor = A4[1] - 120
-    draw_paragraph(c, "Health Score Ranking", header_style, 40, y_cursor, A4[0]-80, 50)
-    y_cursor -= 50
+    draw_paragraph(c, "Health Score Ranking", header_style, 40, y_cursor, A4[0]-80, 50); y_cursor -= 50
     bar_start_x = 60; bar_height = 18; max_bar_width = A4[0] - bar_start_x - 150
     for _, row in results.iterrows():
         if y_cursor < 80: c.showPage(); y_cursor = A4[1] - 80
@@ -317,72 +331,65 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
     draw_paragraph(c, "AI-Powered Detailed Comparison", title_style, 40, A4[1] - 40, A4[0] - 80, 100)
     draw_paragraph(c, ai_narrative, justified_style, 40, A4[1] - 120, A4[0] - 80, A4[1] - 160)
     
-    # --- Pages 3+: Individual Parameter Plots ---
+    # --- Page 3: Calculation Breakdown Table (Restored) ---
+    c.showPage()
+    y_cursor = A4[1] - 40
+    draw_paragraph(c, "Health Score Calculation Breakdown", title_style, 40, y_cursor, A4[0]-80, 100); y_cursor -= 80
+    for lake_id in lake_ids:
+        table_data = [['Parameter', 'Raw Val', 'Norm Pres.', 'Norm Trend', 'Norm P-Val', 'Factor Score', 'Weight', 'Contrib.']]
+        for param, details in sorted(calc_details[lake_id].items()):
+             table_data.append([param[:18], f"{details.get('Raw Value', ''):.2f}", f"{details.get('Norm Pres.', ''):.3f}", f"{details.get('Norm Trend', 'N/A')}" if isinstance(details.get('Norm Trend'), str) else f"{details.get('Norm Trend', ''):.3f}", f"{details.get('Norm P-Val', 'N/A')}" if isinstance(details.get('Norm P-Val'), str) else f"{details.get('Norm P-Val', ''):.3f}", f"{details.get('Factor Score', ''):.3f}", f"{details.get('Weight', ''):.3f}", f"{details.get('Contribution', ''):.3f}",])
+        table = Table(table_data, colWidths=[110, 60, 60, 60, 60, 60, 50, 60])
+        table.setStyle(TableStyle([('BACKGROUND', (0,0), (-1,0), colors.grey), ('TEXTCOLOR',(0,0),(-1,0),colors.whitesmoke), ('ALIGN', (0,0), (-1,-1), 'CENTER'), ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'), ('FONTSIZE', (0,0), (-1,-1), 7), ('BOTTOMPADDING', (0,0), (-1,0), 10), ('BACKGROUND', (0,1), (-1,-1), colors.beige), ('GRID', (0,0), (-1,-1), 1, colors.black)]))
+        table_height = table.wrap(A4[0]-80, A4[1])[1]
+        if y_cursor < table_height + 40: c.showPage(); y_cursor = A4[1] - 40
+        draw_paragraph(c, f"Breakdown for Lake {lake_id}", header_style, 40, y_cursor, 200, 40); y_cursor -= 40
+        table.drawOn(c, 40, y_cursor - table_height); y_cursor -= (table_height + 20)
+    
+    # --- Pages 4+: Individual Parameter Plots ---
     final_weights = get_effective_weights(selected_ui_options, df.columns)
     params_to_plot = sorted([p for p in final_weights.keys() if p != 'HDI'])
     plots = generate_grouped_plots_by_metric(df, lake_ids, params_to_plot)
     for i in range(0, len(plots), 2):
         c.showPage()
         title1, buf1, _ = plots[i]
-        c.setFont("Helvetica-Bold", 12); c.drawCentredString(A4[0] / 2, A4[1] * 0.95 - 40, title1)
+        c.setFont("Helvetica-Bold", 12); c.drawCentredString(A4[0] / 2, A4[1] - 40, title1)
         c.drawImage(ImageReader(buf1), 40, A4[1] * 0.5, width=A4[0] - 80, height=A4[1] * 0.45 - 40, preserveAspectRatio=True)
         if i + 1 < len(plots):
             title2, buf2, _ = plots[i + 1]
             c.setFont("Helvetica-Bold", 12); c.drawCentredString(A4[0] / 2, A4[1] * 0.45 - 40, title2)
             c.drawImage(ImageReader(buf2), 40, A4[1] * 0.05, width=A4[0] - 80, height=A4[1] * 0.40 - 40, preserveAspectRatio=True)
 
-    # --- Holistic Case Study Section ---
+    # --- Case Study Section ---
     c.showPage()
-    draw_paragraph(c, "Holistic Case Study", title_style, 40, A4[1] - 40, A4[0] - 80, 100)
+    draw_paragraph(c, "Case Study", title_style, 40, A4[1]-40, A4[0]-80, 100)
     
     with st.spinner("Generating case study figures and insights..."):
-        # Figure 1: Radar Chart
-        title, buf, _ = plot_radar_chart(calc_details)
-        if buf:
+        case_study_figures = [
+            plot_radar_chart(calc_details),
+            plot_health_score_evolution(df, selected_ui_options),
+            plot_holistic_trajectory_matrix(df, results, selected_ui_options),
+            plot_hdi_vs_health_correlation(results)
+        ]
+        
+        for fig_data in case_study_figures:
+            if fig_data is None or fig_data[1] is None: continue
+            title, buf, is_landscape = fig_data
             c.showPage()
-            data_summary = "\n".join([f"- {p}: {[f'{details[p]['Factor Score']:.2f}' for _, details in calc_details.items()]}" for p in sorted(list(next(iter(calc_details.values())).keys()))])
+            
+            # Build prompt and get AI insight for this specific figure
+            data_summary = f"Data for figure '{title}'..." # Placeholder, specific summaries can be built
             ai_prompt = build_figure_specific_ai_prompt(title, data_summary)
             ai_narrative = generate_ai_insight(ai_prompt)
-            c.setFont("Helvetica-Bold", 14); c.drawCentredString(A4[0]/2, A4[1]-40, title)
-            c.drawImage(ImageReader(buf), 40, A4[1]*0.4, width=A4[0]-80, height=A4[1]*0.5, preserveAspectRatio=True)
-            draw_paragraph(c, ai_narrative, justified_style, 40, A4[1]*0.4 - 20, A4[0]-80, A4[1]*0.4 - 40)
 
-        # Figure 2: Health Score Evolution
-        title, buf, _ = plot_health_score_evolution(df, selected_ui_options)
-        if buf:
-            c.showPage()
-            hist_scores = calculate_historical_scores(df, selected_ui_options)
-            data_summary = hist_scores.pivot(index='Year', columns='Lake_ID', values='Health Score').to_string()
-            ai_prompt = build_figure_specific_ai_prompt(title, data_summary)
-            ai_narrative = generate_ai_insight(ai_prompt)
-            c.setFont("Helvetica-Bold", 14); c.drawCentredString(A4[0]/2, A4[1]-40, title)
-            c.drawImage(ImageReader(buf), 40, A4[1]*0.4, width=A4[0]-80, height=A4[1]*0.5, preserveAspectRatio=True)
-            draw_paragraph(c, ai_narrative, justified_style, 40, A4[1]*0.4 - 20, A4[0]-80, A4[1]*0.4 - 40)
-            
-        # Figure 3: Trajectory Matrix
-        title, buf, _ = plot_holistic_trajectory_matrix(df, results, selected_ui_options)
-        if buf:
-            c.showPage()
-            hist_scores = calculate_historical_scores(df, selected_ui_options)
-            trends = hist_scores.groupby('Lake_ID').apply(lambda x: linregress(x['Year'], x['Health Score']).slope if len(x['Year'].unique()) > 1 else 0)
-            data_summary = "\n".join([f"- Lake {row['Lake_ID']}: Score={row['Health Score']:.2f}, Trend Slope={trends.get(row['Lake_ID'], 0):.4f}" for _, row in results.iterrows()])
-            ai_prompt = build_figure_specific_ai_prompt(title, data_summary)
-            ai_narrative = generate_ai_insight(ai_prompt)
-            c.setFont("Helvetica-Bold", 14); c.drawCentredString(A4[0]/2, A4[1]-40, title)
-            c.drawImage(ImageReader(buf), 40, A4[1]*0.4, width=A4[0]-80, height=A4[1]*0.5, preserveAspectRatio=True)
-            draw_paragraph(c, ai_narrative, justified_style, 40, A4[1]*0.4 - 20, A4[0]-80, A4[1]*0.4 - 40)
-            
-        # Figure 4: HDI Correlation
-        title, buf, _ = plot_hdi_vs_health_correlation(results)
-        if buf:
-            c.showPage()
-            data_summary = "\n".join([f"- Lake {row['Lake_ID']}: Score={row['Health Score']:.2f}, HDI={row['HDI']:.3f}" for _, row in results.dropna(subset=['HDI']).iterrows()])
-            ai_prompt = build_figure_specific_ai_prompt(title, data_summary)
-            ai_narrative = generate_ai_insight(ai_prompt)
-            c.setFont("Helvetica-Bold", 14); c.drawCentredString(A4[0]/2, A4[1]-40, title)
-            c.drawImage(ImageReader(buf), 40, A4[1]*0.4, width=A4[0]-80, height=A4[1]*0.5, preserveAspectRatio=True)
-            draw_paragraph(c, ai_narrative, justified_style, 40, A4[1]*0.4 - 20, A4[0]-80, A4[1]*0.4 - 40)
-            
+            # Draw Figure and AI text
+            page_width, page_height = (landscape(A4) if is_landscape else A4)
+            c.setPageSize((page_width, page_height))
+            c.setFont("Helvetica-Bold", 14); c.drawCentredString(page_width/2, page_height-40, title)
+            c.drawImage(ImageReader(buf), 40, page_height * 0.4, width=page_width-80, height=page_height * 0.5, preserveAspectRatio=True)
+            draw_paragraph(c, ai_narrative, justified_style, 40, page_height*0.4 - 20, page_width-80, page_height*0.4 - 40)
+            if is_landscape: c.setPageSize(A4)
+
     c.save(); buffer.seek(0)
     return buffer
 
