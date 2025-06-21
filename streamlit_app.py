@@ -38,7 +38,8 @@ PARAMETER_PROPERTIES = {
 }
 LAND_COVER_INTERNAL_COLS = ['Barren Area', 'Urban Area', 'Vegetation Area']
 
-# --- CORE DATA & ANALYSIS FUNCTIONS (Unchanged from previous correct version) ---
+
+# --- CORE DATA & ANALYSIS FUNCTIONS ---
 @st.cache_data
 def prepare_all_data(health_path, location_path):
     try:
@@ -166,7 +167,7 @@ def generate_grouped_plots_by_metric(df, lake_ids, metrics):
         ax.legend(); ax.grid(True, which='both', linestyle='--', linewidth=0.5)
         plt.tight_layout()
         buf = BytesIO(); plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.3); plt.close(fig)
-        grouped_images.append((f"Trend for: {metric}", buf, False)) # Title, buffer, is_landscape=False
+        grouped_images.append((f"Trend for: {metric}", buf, False))
     return grouped_images
 
 def plot_health_score_composition(results, calc_details):
@@ -186,8 +187,8 @@ def plot_health_score_composition(results, calc_details):
     ax.set_xlabel('Lakes (sorted by rank)', fontsize=12); ax.set_ylabel('Weighted Contribution to Health Score', fontsize=12)
     ax.legend(title='Parameter Group', bbox_to_anchor=(1.02, 1), loc='upper left')
     ax.tick_params(axis='x', rotation=45)
-    # FIX: Use tight_layout with a rect to ensure legend is not cut off.
-    plt.tight_layout(rect=[0, 0, 0.8, 1])
+    # FIX: Manually adjust subplot to guarantee space for the legend
+    plt.subplots_adjust(right=0.75)
     buf = BytesIO(); plt.savefig(buf, format='png'); plt.close(fig)
     return "Figure 1: Health Score Composition", buf, True
 
@@ -209,7 +210,6 @@ def plot_radar_chart(calc_details):
     return "Figure 2: Lake Health Fingerprint", buf, False
 
 def plot_health_score_evolution(df, confirmed_params):
-    """RESTORED: Small multiples plot of historical health scores."""
     historical_scores = calculate_historical_scores(df, confirmed_params)
     if historical_scores.empty: return None, None, None
     lake_ids = sorted(historical_scores['Lake_ID'].unique())
@@ -224,8 +224,7 @@ def plot_health_score_evolution(df, confirmed_params):
         ax.set_title(f"Lake {lake_id}"); ax.grid(True, linestyle='--', alpha=0.6)
         ax.xaxis.set_major_locator(MaxNLocator(integer=True, nbins=5))
     fig.suptitle('Evolution of Overall Lake Health Score', fontsize=20, y=1.03)
-    fig.supxlabel('Year', fontsize=14, y=0.01)
-    fig.supylabel('Health Score', fontsize=14, x=0.01)
+    fig.supxlabel('Year', fontsize=14, y=0.01); fig.supylabel('Health Score', fontsize=14, x=0.01)
     for i in range(n_lakes, len(axes)): axes[i].set_visible(False)
     plt.tight_layout(rect=[0.03, 0.03, 1, 0.95]); buf = BytesIO(); plt.savefig(buf, format='png'); plt.close(fig)
     return "Figure 3: Evolution of Overall Health Score", buf, False
@@ -265,7 +264,6 @@ def plot_hdi_vs_health_correlation(results):
     plt.tight_layout(); buf = BytesIO(); plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.3); plt.close(fig)
     return "Figure 5: HDI vs. Lake Health", buf, False
 
-
 # --- AI & PDF GENERATION ---
 def build_case_study_ai_prompt(results, df, confirmed_params):
     historical_scores = calculate_historical_scores(df, confirmed_params)
@@ -283,17 +281,28 @@ def build_case_study_ai_prompt(results, df, confirmed_params):
     return prompt
 
 def generate_ai_insight(prompt):
+    """Robust function to get AI insight, using the specified model."""
     API_KEY = st.secrets.get("OPENROUTER_API_KEY")
-    if not API_KEY: return "API Key not found. Please add your OpenRouter API key to Streamlit secrets to enable this feature."
+    if not API_KEY: return "Error: API Key not found. Please configure it in Streamlit secrets."
+    
     API_URL = "https://openrouter.ai/api/v1/chat/completions"
     headers = {"Authorization": f"Bearer {API_KEY}"}
-    data = {"model": "anthropic/claude-3-haiku", "messages": [{"role": "user", "content": prompt}]}
+    data = {"model": "deepseek/deepseek-chat:free", "messages": [{"role": "user", "content": prompt}]}
+    
     try:
         response = requests.post(API_URL, json=data, headers=headers, timeout=90)
+        # Check for any HTTP error, including 402
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"]
-    except requests.exceptions.RequestException as e: return f"Network error during AI analysis: {e}"
-    except (KeyError, IndexError): return "Failed to parse AI response. The model may be temporarily unavailable."
+    except requests.exceptions.HTTPError as e:
+        # Provide a specific, helpful error message for billing issues
+        if e.response.status_code == 402:
+            return "AI Analysis Failed: 402 Payment Required. Please check your OpenRouter account balance or rate limits."
+        return f"AI Analysis Failed: HTTP Error {e.response.status_code} - {e}"
+    except requests.exceptions.RequestException as e:
+        return f"AI Analysis Failed: Network error - {e}"
+    except (KeyError, IndexError):
+        return "AI Analysis Failed: Could not parse a valid response from the AI model."
 
 def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selected_ui_options):
     buffer = BytesIO()
@@ -305,7 +314,7 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
     y_cursor = A4[1] - 40
     def draw_paragraph(text, style, available_width=A4[0]-80):
         nonlocal y_cursor
-        p = Paragraph(text.replace('\n', '<br/>'), style)
+        p = Paragraph(str(text).replace('\n', '<br/>'), style) # Ensure text is a string
         p_width, p_height = p.wrapOn(c, available_width, A4[1])
         if y_cursor - p_height < 40: c.showPage(); y_cursor = A4[1] - 40
         p.drawOn(c, 40, y_cursor - p_height); y_cursor -= (p_height + style.spaceAfter)
@@ -322,7 +331,7 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
         c.setFillColor(colors.black); c.setFont("Helvetica", 9); c.drawString(bar_start_x + 5, y_cursor - bar_height + 5, f"Lake {row['Lake_ID']} (Rank {rank}) - Score: {score:.3f}")
         y_cursor -= (bar_height + 10)
 
-    # --- Collect all figures to draw ---
+    # --- Collect all figures ---
     all_figures_to_draw = []
     final_weights = get_effective_weights(selected_ui_options, df.columns)
     params_to_plot = sorted([p for p in final_weights.keys() if p != 'HDI'])
@@ -330,54 +339,48 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
     with st.spinner("Generating plots and case study..."):
         all_figures_to_draw.extend(generate_grouped_plots_by_metric(df, lake_ids, params_to_plot))
         
-        # Case Study Introduction and AI Narrative
         c.showPage(); y_cursor = A4[1] - 40
         draw_paragraph("Holistic Case Study", title_style)
         ai_prompt = build_case_study_ai_prompt(results, df, selected_ui_options)
         ai_narrative = generate_ai_insight(ai_prompt)
         draw_paragraph(ai_narrative, justified_style)
         
-        # Add case study figures to the list
-        all_figures_to_draw.append(plot_health_score_composition(results, calc_details))
-        all_figures_to_draw.append(plot_radar_chart(calc_details))
-        all_figures_to_draw.append(plot_health_score_evolution(df, selected_ui_options))
-        all_figures_to_draw.append(plot_holistic_trajectory_matrix(df, results, selected_ui_options))
-        all_figures_to_draw.append(plot_hdi_vs_health_correlation(results))
-        all_figures_to_draw = [fig for fig in all_figures_to_draw if fig[1] is not None]
+        case_study_figures = [
+            plot_health_score_composition(results, calc_details),
+            plot_radar_chart(calc_details),
+            plot_health_score_evolution(df, selected_ui_options),
+            plot_holistic_trajectory_matrix(df, results, selected_ui_options),
+            plot_hdi_vs_health_correlation(results)
+        ]
+        all_figures_to_draw.extend([fig for fig in case_study_figures if fig is not None and fig[1] is not None])
 
-    # --- NEW COMPACT DRAWING LOOP ---
+    # --- COMPACT DRAWING LOOP ---
     i = 0
     while i < len(all_figures_to_draw):
         c.showPage()
         title1, buf1, is_landscape1 = all_figures_to_draw[i]
-        
         if is_landscape1:
-            page_width, page_height = landscape(A4)
-            c.setPageSize((page_width, page_height))
+            page_width, page_height = landscape(A4); c.setPageSize((page_width, page_height))
             c.setFont("Helvetica-Bold", 14); c.drawCentredString(page_width / 2, page_height - 40, title1)
             c.drawImage(ImageReader(buf1), 40, 40, width=page_width - 80, height=page_height - 95, preserveAspectRatio=True)
-            c.setPageSize(A4)
-            i += 1
+            c.setPageSize(A4); i += 1
             continue
         
-        # Draw top plot
         c.setFont("Helvetica-Bold", 12); c.drawCentredString(A4[0] / 2, A4[1] * 0.95 - 40, title1)
         c.drawImage(ImageReader(buf1), 40, A4[1] * 0.5, width=A4[0] - 80, height=A4[1] * 0.45 - 40, preserveAspectRatio=True)
-
         i += 1
-        # Check if a second, portrait plot can be paired
+        
         if i < len(all_figures_to_draw):
             title2, buf2, is_landscape2 = all_figures_to_draw[i]
             if not is_landscape2:
                 c.setFont("Helvetica-Bold", 12); c.drawCentredString(A4[0] / 2, A4[1] * 0.45 - 40, title2)
                 c.drawImage(ImageReader(buf2), 40, A4[1] * 0.05, width=A4[0] - 80, height=A4[1] * 0.40 - 40, preserveAspectRatio=True)
-                i += 1 # Move to the next item since we've drawn a pair
+                i += 1
     
     c.save(); buffer.seek(0)
     return buffer
 
-
-# --- STREAMLIT APP LAYOUT (Unchanged) ---
+# --- STREAMLIT APP LAYOUT ---
 st.set_page_config(layout="wide")
 st.title("🌊 Dynamic Lake Health Dashboard")
 df_health_full, df_location, ui_options = prepare_all_data(HEALTH_DATA_PATH, LOCATION_DATA_PATH)
