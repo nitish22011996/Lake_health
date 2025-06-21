@@ -7,3 +7,5 @@ reportlab
 openai
 httpx
 scipy
+folium
+streamlit-folium
