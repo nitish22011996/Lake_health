@@ -143,6 +143,7 @@ def calculate_historical_scores(_df_full, selected_ui_options):
     historical_df['Rank'] = historical_df.groupby('Year')['Health Score'].rank(ascending=False, method='min').astype(int)
     return historical_df
 
+
 # --- PLOTTING FUNCTIONS ---
 def generate_grouped_plots_by_metric(df, lake_ids, metrics):
     grouped_images = []
@@ -170,28 +171,6 @@ def generate_grouped_plots_by_metric(df, lake_ids, metrics):
         grouped_images.append((f"Trend for: {metric}", buf, False))
     return grouped_images
 
-def plot_health_score_composition(results, calc_details):
-    composition_data = []
-    for _, row in results.iterrows():
-        lake_id, details = row['Lake_ID'], calc_details[row['Lake_ID']]
-        comp = {'Lake_ID': f"Lake {lake_id}"}
-        for param, detail_values in details.items():
-            param_type = PARAMETER_PROPERTIES[param]['type']
-            comp[param_type] = comp.get(param_type, 0) + detail_values['Contribution']
-        composition_data.append(comp)
-    df_comp = pd.DataFrame(composition_data).set_index('Lake_ID').reindex([f"Lake {l}" for l in results['Lake_ID']])
-    plt.style.use('seaborn-v0_8-whitegrid')
-    fig, ax = plt.subplots(figsize=(12, 8), dpi=150)
-    df_comp.plot(kind='bar', stacked=True, ax=ax, colormap='viridis')
-    ax.set_title('Health Score Composition by Parameter Group', fontsize=16, pad=20)
-    ax.set_xlabel('Lakes (sorted by rank)', fontsize=12); ax.set_ylabel('Weighted Contribution to Health Score', fontsize=12)
-    ax.legend(title='Parameter Group', bbox_to_anchor=(1.02, 1), loc='upper left')
-    ax.tick_params(axis='x', rotation=45)
-    # FIX: Manually adjust subplot to guarantee space for the legend
-    plt.subplots_adjust(right=0.75)
-    buf = BytesIO(); plt.savefig(buf, format='png'); plt.close(fig)
-    return "Figure 1: Health Score Composition", buf, True
-
 def plot_radar_chart(calc_details):
     if not calc_details: return None, None, None
     params = sorted(list(next(iter(calc_details.values())).keys()))
@@ -207,7 +186,7 @@ def plot_radar_chart(calc_details):
     ax.set_title("Lake Health Fingerprint", size=20, y=1.1)
     ax.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1))
     buf = BytesIO(); plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.3); plt.close(fig)
-    return "Figure 2: Lake Health Fingerprint", buf, False
+    return "Figure 1: Lake Health Fingerprint", buf, False
 
 def plot_health_score_evolution(df, confirmed_params):
     historical_scores = calculate_historical_scores(df, confirmed_params)
@@ -227,7 +206,7 @@ def plot_health_score_evolution(df, confirmed_params):
     fig.supxlabel('Year', fontsize=14, y=0.01); fig.supylabel('Health Score', fontsize=14, x=0.01)
     for i in range(n_lakes, len(axes)): axes[i].set_visible(False)
     plt.tight_layout(rect=[0.03, 0.03, 1, 0.95]); buf = BytesIO(); plt.savefig(buf, format='png'); plt.close(fig)
-    return "Figure 3: Evolution of Overall Health Score", buf, False
+    return "Figure 2: Evolution of Overall Health Score", buf, False
 
 def plot_holistic_trajectory_matrix(df, results, confirmed_params):
     historical_scores = calculate_historical_scores(df, confirmed_params)
@@ -246,7 +225,7 @@ def plot_holistic_trajectory_matrix(df, results, confirmed_params):
     plt.text(avg_score - 0.01, ax.get_ylim()[1], 'In Recovery', ha='right', va='top', color='blue', alpha=0.7)
     plt.text(avg_score - 0.01, ax.get_ylim()[0], 'Critical Condition', ha='right', va='bottom', color='red', alpha=0.7)
     plt.tight_layout(); buf = BytesIO(); plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.3); plt.close(fig)
-    return "Figure 4: Holistic Lake Trajectory", buf, False
+    return "Figure 3: Holistic Lake Trajectory", buf, False
 
 def plot_hdi_vs_health_correlation(results):
     fig, ax = plt.subplots(figsize=(10, 7), dpi=150)
@@ -262,47 +241,44 @@ def plot_hdi_vs_health_correlation(results):
     ax.set_title('Socioeconomic Context: HDI vs. Lake Health', fontsize=16, pad=20)
     ax.set_xlabel('Human Development Index (HDI)', fontsize=12); ax.set_ylabel('Final Health Score', fontsize=12)
     plt.tight_layout(); buf = BytesIO(); plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.3); plt.close(fig)
-    return "Figure 5: HDI vs. Lake Health", buf, False
+    return "Figure 4: HDI vs. Lake Health", buf, False
+
 
 # --- AI & PDF GENERATION ---
-def build_case_study_ai_prompt(results, df, confirmed_params):
-    historical_scores = calculate_historical_scores(df, confirmed_params)
-    trends = historical_scores.groupby('Lake_ID').apply(lambda x: linregress(x['Year'], x['Health Score']).slope if len(x['Year'].unique()) > 1 else 0)
-    prompt = "You are an expert environmental analyst authoring a case study report on a set of lakes. Your task is to write a cohesive narrative interpreting the provided summary data. Do not simply list the data. Instead, synthesize it into a high-level analysis.\n\n"
-    prompt += "Structure your analysis with these sections:\n"
-    prompt += "1.  **Overall Health Landscape:** Identify the top-performing and most critical lakes. Are there clear groupings of lakes based on their health scores and recent trends (e.g., healthy and stable, vulnerable, in recovery)?\n"
-    prompt += "2.  **Socioeconomic Factors:** Discuss the relationship between Human Development Index (HDI) and lake health. Does higher development correlate with better or worse health in this specific case study? Point out any lakes that are notable exceptions to the general trend.\n"
-    prompt += "3.  **Strategic Summary & Outlook:** Conclude with a high-level summary. Which lakes represent the biggest success stories? Which are of the greatest concern for future monitoring and intervention?\n\n"
-    prompt += "### Summary Data for Analysis:\n"
+def build_detailed_ai_prompt(results, calc_details):
+    prompt = "You are an expert environmental data analyst. Generate a detailed comparative analysis of the following lakes based on their health parameters. For each parameter group (e.g., Climate, Water Quality), explain how the lakes compare and which lakes are performing better or worse in that specific area.\n\n"
+    prompt += "### Lake Data Profiles:\n"
     for _, row in results.iterrows():
-        lake_id, trend_slope = row['Lake_ID'], trends.get(row['Lake_ID'], 0)
-        trend_desc = "Improving" if trend_slope > 0.001 else "Declining" if trend_slope < -0.001 else "Stable"
-        prompt += f"- **Lake {lake_id}:**\n  - Final Health Score: {row['Health Score']:.3f} (Rank: {row['Rank']})\n  - Overall Trend: {trend_desc} (slope: {trend_slope:.4f})\n  - HDI: {row.get('HDI', 'N/A'):.3f}\n"
+        lake_id = row['Lake_ID']
+        prompt += f"--- Lake {lake_id} ---\n"
+        prompt += f"Final Health Score: {row['Health Score']:.3f} (Rank: {row['Rank']})\n"
+        for param, details in calc_details[lake_id].items():
+            prompt += f"- {param}: {details['Raw Value']:.2f} (Factor Score: {details['Factor Score']:.3f})\n"
+    return prompt
+
+def build_figure_specific_ai_prompt(figure_title, data_summary):
+    prompt = f"You are an environmental data analyst interpreting a figure for a report. The figure is titled '{figure_title}'. Below is a summary of the data used to create this figure.\n\n"
+    prompt += "### Data Summary:\n"
+    prompt += data_summary
+    prompt += "\n\n### Your Task:\n"
+    prompt += "Write a concise, insightful paragraph (3-5 sentences) that interprets this figure. Explain what the visual pattern reveals about the lakes being compared. Do not just list the data; provide a high-level interpretation of the findings shown in the chart."
     return prompt
 
 def generate_ai_insight(prompt):
-    """Robust function to get AI insight, using the specified model."""
     API_KEY = st.secrets.get("OPENROUTER_API_KEY")
     if not API_KEY: return "Error: API Key not found. Please configure it in Streamlit secrets."
-    
     API_URL = "https://openrouter.ai/api/v1/chat/completions"
     headers = {"Authorization": f"Bearer {API_KEY}"}
     data = {"model": "deepseek/deepseek-chat:free", "messages": [{"role": "user", "content": prompt}]}
-    
     try:
         response = requests.post(API_URL, json=data, headers=headers, timeout=90)
-        # Check for any HTTP error, including 402
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"]
     except requests.exceptions.HTTPError as e:
-        # Provide a specific, helpful error message for billing issues
-        if e.response.status_code == 402:
-            return "AI Analysis Failed: 402 Payment Required. Please check your OpenRouter account balance or rate limits."
+        if e.response.status_code == 402: return "AI Analysis Failed: 402 Payment Required. Please check your OpenRouter account balance or rate limits."
         return f"AI Analysis Failed: HTTP Error {e.response.status_code} - {e}"
-    except requests.exceptions.RequestException as e:
-        return f"AI Analysis Failed: Network error - {e}"
-    except (KeyError, IndexError):
-        return "AI Analysis Failed: Could not parse a valid response from the AI model."
+    except requests.exceptions.RequestException as e: return f"AI Analysis Failed: Network error - {e}"
+    except (KeyError, IndexError): return "AI Analysis Failed: Could not parse a valid response from the AI model."
 
 def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selected_ui_options):
     buffer = BytesIO()
@@ -311,72 +287,102 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
     justified_style = ParagraphStyle(name='Justified',parent=styles['Normal'],alignment=4,fontSize=10,leading=14)
     title_style = ParagraphStyle(name='Title', parent=styles['h1'], alignment=1, fontSize=20)
     header_style = ParagraphStyle(name='Header', parent=styles['h2'], alignment=0, spaceBefore=12, spaceAfter=6)
-    y_cursor = A4[1] - 40
-    def draw_paragraph(text, style, available_width=A4[0]-80):
-        nonlocal y_cursor
-        p = Paragraph(str(text).replace('\n', '<br/>'), style) # Ensure text is a string
-        p_width, p_height = p.wrapOn(c, available_width, A4[1])
-        if y_cursor - p_height < 40: c.showPage(); y_cursor = A4[1] - 40
-        p.drawOn(c, 40, y_cursor - p_height); y_cursor -= (p_height + style.spaceAfter)
+    
+    # --- PDF Helper ---
+    def draw_paragraph(canvas_obj, text, style, x, y, width, height):
+        p = Paragraph(str(text).replace('\n', '<br/>'), style)
+        p.wrapOn(canvas_obj, width, height)
+        p.drawOn(canvas_obj, x, y - p.height)
+        return p.height
 
     # --- Page 1: Title and Ranking ---
-    draw_paragraph("Dynamic Lake Health Report", title_style)
-    draw_paragraph("Health Score Ranking", header_style)
+    draw_paragraph(c, "Dynamic Lake Health Report", title_style, 40, A4[1] - 40, A4[0] - 80, 100)
+    y_cursor = A4[1] - 120
+    draw_paragraph(c, "Health Score Ranking", header_style, 40, y_cursor, A4[0]-80, 50)
+    y_cursor -= 50
     bar_start_x = 60; bar_height = 18; max_bar_width = A4[0] - bar_start_x - 150
     for _, row in results.iterrows():
-        if y_cursor - (bar_height + 10) < 40: c.showPage(); y_cursor = A4[1] - 40
+        if y_cursor < 80: c.showPage(); y_cursor = A4[1] - 80
         score = row['Health Score']; rank = int(row['Rank'])
         color = colors.darkgreen if score > 0.75 else colors.orange if score > 0.5 else colors.firebrick
         c.setFillColor(color); c.rect(bar_start_x, y_cursor - bar_height, score * max_bar_width, bar_height, fill=1, stroke=0)
         c.setFillColor(colors.black); c.setFont("Helvetica", 9); c.drawString(bar_start_x + 5, y_cursor - bar_height + 5, f"Lake {row['Lake_ID']} (Rank {rank}) - Score: {score:.3f}")
         y_cursor -= (bar_height + 10)
 
-    # --- Collect all figures ---
-    all_figures_to_draw = []
+    # --- Page 2: Detailed AI Comparison ---
+    c.showPage()
+    with st.spinner("Generating detailed AI parameter analysis..."):
+        ai_prompt = build_detailed_ai_prompt(results, calc_details)
+        ai_narrative = generate_ai_insight(ai_prompt)
+    draw_paragraph(c, "AI-Powered Detailed Comparison", title_style, 40, A4[1] - 40, A4[0] - 80, 100)
+    draw_paragraph(c, ai_narrative, justified_style, 40, A4[1] - 120, A4[0] - 80, A4[1] - 160)
+    
+    # --- Pages 3+: Individual Parameter Plots ---
     final_weights = get_effective_weights(selected_ui_options, df.columns)
     params_to_plot = sorted([p for p in final_weights.keys() if p != 'HDI'])
-    
-    with st.spinner("Generating plots and case study..."):
-        all_figures_to_draw.extend(generate_grouped_plots_by_metric(df, lake_ids, params_to_plot))
-        
-        c.showPage(); y_cursor = A4[1] - 40
-        draw_paragraph("Holistic Case Study", title_style)
-        ai_prompt = build_case_study_ai_prompt(results, df, selected_ui_options)
-        ai_narrative = generate_ai_insight(ai_prompt)
-        draw_paragraph(ai_narrative, justified_style)
-        
-        case_study_figures = [
-            plot_health_score_composition(results, calc_details),
-            plot_radar_chart(calc_details),
-            plot_health_score_evolution(df, selected_ui_options),
-            plot_holistic_trajectory_matrix(df, results, selected_ui_options),
-            plot_hdi_vs_health_correlation(results)
-        ]
-        all_figures_to_draw.extend([fig for fig in case_study_figures if fig is not None and fig[1] is not None])
-
-    # --- COMPACT DRAWING LOOP ---
-    i = 0
-    while i < len(all_figures_to_draw):
+    plots = generate_grouped_plots_by_metric(df, lake_ids, params_to_plot)
+    for i in range(0, len(plots), 2):
         c.showPage()
-        title1, buf1, is_landscape1 = all_figures_to_draw[i]
-        if is_landscape1:
-            page_width, page_height = landscape(A4); c.setPageSize((page_width, page_height))
-            c.setFont("Helvetica-Bold", 14); c.drawCentredString(page_width / 2, page_height - 40, title1)
-            c.drawImage(ImageReader(buf1), 40, 40, width=page_width - 80, height=page_height - 95, preserveAspectRatio=True)
-            c.setPageSize(A4); i += 1
-            continue
-        
+        title1, buf1, _ = plots[i]
         c.setFont("Helvetica-Bold", 12); c.drawCentredString(A4[0] / 2, A4[1] * 0.95 - 40, title1)
         c.drawImage(ImageReader(buf1), 40, A4[1] * 0.5, width=A4[0] - 80, height=A4[1] * 0.45 - 40, preserveAspectRatio=True)
-        i += 1
-        
-        if i < len(all_figures_to_draw):
-            title2, buf2, is_landscape2 = all_figures_to_draw[i]
-            if not is_landscape2:
-                c.setFont("Helvetica-Bold", 12); c.drawCentredString(A4[0] / 2, A4[1] * 0.45 - 40, title2)
-                c.drawImage(ImageReader(buf2), 40, A4[1] * 0.05, width=A4[0] - 80, height=A4[1] * 0.40 - 40, preserveAspectRatio=True)
-                i += 1
+        if i + 1 < len(plots):
+            title2, buf2, _ = plots[i + 1]
+            c.setFont("Helvetica-Bold", 12); c.drawCentredString(A4[0] / 2, A4[1] * 0.45 - 40, title2)
+            c.drawImage(ImageReader(buf2), 40, A4[1] * 0.05, width=A4[0] - 80, height=A4[1] * 0.40 - 40, preserveAspectRatio=True)
+
+    # --- Holistic Case Study Section ---
+    c.showPage()
+    draw_paragraph(c, "Holistic Case Study", title_style, 40, A4[1] - 40, A4[0] - 80, 100)
     
+    with st.spinner("Generating case study figures and insights..."):
+        # Figure 1: Radar Chart
+        title, buf, _ = plot_radar_chart(calc_details)
+        if buf:
+            c.showPage()
+            data_summary = "\n".join([f"- {p}: {[f'{details[p]['Factor Score']:.2f}' for _, details in calc_details.items()]}" for p in sorted(list(next(iter(calc_details.values())).keys()))])
+            ai_prompt = build_figure_specific_ai_prompt(title, data_summary)
+            ai_narrative = generate_ai_insight(ai_prompt)
+            c.setFont("Helvetica-Bold", 14); c.drawCentredString(A4[0]/2, A4[1]-40, title)
+            c.drawImage(ImageReader(buf), 40, A4[1]*0.4, width=A4[0]-80, height=A4[1]*0.5, preserveAspectRatio=True)
+            draw_paragraph(c, ai_narrative, justified_style, 40, A4[1]*0.4 - 20, A4[0]-80, A4[1]*0.4 - 40)
+
+        # Figure 2: Health Score Evolution
+        title, buf, _ = plot_health_score_evolution(df, selected_ui_options)
+        if buf:
+            c.showPage()
+            hist_scores = calculate_historical_scores(df, selected_ui_options)
+            data_summary = hist_scores.pivot(index='Year', columns='Lake_ID', values='Health Score').to_string()
+            ai_prompt = build_figure_specific_ai_prompt(title, data_summary)
+            ai_narrative = generate_ai_insight(ai_prompt)
+            c.setFont("Helvetica-Bold", 14); c.drawCentredString(A4[0]/2, A4[1]-40, title)
+            c.drawImage(ImageReader(buf), 40, A4[1]*0.4, width=A4[0]-80, height=A4[1]*0.5, preserveAspectRatio=True)
+            draw_paragraph(c, ai_narrative, justified_style, 40, A4[1]*0.4 - 20, A4[0]-80, A4[1]*0.4 - 40)
+            
+        # Figure 3: Trajectory Matrix
+        title, buf, _ = plot_holistic_trajectory_matrix(df, results, selected_ui_options)
+        if buf:
+            c.showPage()
+            hist_scores = calculate_historical_scores(df, selected_ui_options)
+            trends = hist_scores.groupby('Lake_ID').apply(lambda x: linregress(x['Year'], x['Health Score']).slope if len(x['Year'].unique()) > 1 else 0)
+            data_summary = "\n".join([f"- Lake {row['Lake_ID']}: Score={row['Health Score']:.2f}, Trend Slope={trends.get(row['Lake_ID'], 0):.4f}" for _, row in results.iterrows()])
+            ai_prompt = build_figure_specific_ai_prompt(title, data_summary)
+            ai_narrative = generate_ai_insight(ai_prompt)
+            c.setFont("Helvetica-Bold", 14); c.drawCentredString(A4[0]/2, A4[1]-40, title)
+            c.drawImage(ImageReader(buf), 40, A4[1]*0.4, width=A4[0]-80, height=A4[1]*0.5, preserveAspectRatio=True)
+            draw_paragraph(c, ai_narrative, justified_style, 40, A4[1]*0.4 - 20, A4[0]-80, A4[1]*0.4 - 40)
+            
+        # Figure 4: HDI Correlation
+        title, buf, _ = plot_hdi_vs_health_correlation(results)
+        if buf:
+            c.showPage()
+            data_summary = "\n".join([f"- Lake {row['Lake_ID']}: Score={row['Health Score']:.2f}, HDI={row['HDI']:.3f}" for _, row in results.dropna(subset=['HDI']).iterrows()])
+            ai_prompt = build_figure_specific_ai_prompt(title, data_summary)
+            ai_narrative = generate_ai_insight(ai_prompt)
+            c.setFont("Helvetica-Bold", 14); c.drawCentredString(A4[0]/2, A4[1]-40, title)
+            c.drawImage(ImageReader(buf), 40, A4[1]*0.4, width=A4[0]-80, height=A4[1]*0.5, preserveAspectRatio=True)
+            draw_paragraph(c, ai_narrative, justified_style, 40, A4[1]*0.4 - 20, A4[0]-80, A4[1]*0.4 - 40)
+            
     c.save(); buffer.seek(0)
     return buffer
 
