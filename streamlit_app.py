@@ -345,15 +345,9 @@ def generate_ai_insight(prompt):
 
 # --- PDF GENERATION WITH ROBUST TWO-PASS MANUAL CANVAS METHOD ---
 class NumberedCanvas(canvas.Canvas):
-    """
-    A custom canvas class to handle page numbering.
-    The `save` method is modified to loop through the saved page states
-    and draw the page number on each page.
-    """
     def __init__(self, *args, **kwargs):
         canvas.Canvas.__init__(self, *args, **kwargs)
         self._saved_page_states = []
-        self._page_count = 0
 
     def showPage(self):
         self._saved_page_states.append(dict(self.__dict__))
@@ -410,7 +404,6 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
     y_cursor -= draw_paragraph(c, "Lake Health Report", title_style, 40, y_cursor, A4[0] - 80, 100)
     y_cursor -= 30
     
-    # Create bookmarks (links)
     params_to_plot = sorted([p for p in get_effective_weights(selected_ui_options, df.columns).keys() if p != 'HDI'])
     bookmarks = [("Health Score Ranking", "ranking", 0), ("AI-Powered Detailed Comparison", "ai_comparison", 0),
                  ("Health Score Calculation Breakdown", "breakdown", 0), ("Parameter Trend Plots", "parameter_plots", 0)]
@@ -426,10 +419,9 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
     c.showPage()
 
     # --- Ranking Page ---
-    c.bookmarkPage('ranking') # Define the destination for the link
+    c.bookmarkPage('ranking')
     y_cursor = A4[1] - 80
     y_cursor -= draw_paragraph(c, "Health Score Ranking", header_style, 40, y_cursor, A4[0]-80, 50)
-    # ... rest of the ranking content ...
     bar_start_x = 60; bar_height = 18; max_bar_width = A4[0] - bar_start_x - 150
     for _, row in results.iterrows():
         if y_cursor < 150:
@@ -443,14 +435,14 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
     
     # --- AI Comparison Page ---
     c.bookmarkPage('ai_comparison')
+    y_cursor = A4[1] - 50
+    y_cursor -= draw_paragraph(c, "AI-Powered Detailed Comparison", title_style, 40, y_cursor, A4[0]-80, 100)
     ai_prompt = build_detailed_ai_prompt(results, calc_details, tuple(lake_ids))
     ai_narrative = generate_ai_insight(ai_prompt).replace('\n', '<br/>')
     story = [Paragraph(ai_narrative, justified_style)]
-    page_top_margin = 80; page_bottom_margin = 60
     page_width = A4[0] - 80; x_pos = 40
-    y_cursor = A4[1] - page_top_margin
-    y_cursor -= draw_paragraph(c, "AI-Powered Detailed Comparison", title_style, 40, y_cursor, page_width, 100)
-    available_height = y_cursor - page_bottom_margin
+    y_cursor -= 20
+    available_height = y_cursor - 60
     while story:
         p = story.pop(0)
         frags = p.split(page_width, available_height)
@@ -461,8 +453,8 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
                 frags[0].wrapOn(c, page_width, available_height); frags[0].drawOn(c, x_pos, y_cursor - frags[0].height)
             story.extend(frags[1:])
             c.showPage()
-            y_cursor = A4[1] - page_top_margin
-            available_height = y_cursor - page_bottom_margin
+            y_cursor = A4[1] - 80
+            available_height = y_cursor - 60
     c.showPage()
     
     # --- Breakdown Page ---
@@ -473,12 +465,12 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
         if y_cursor < 200: c.showPage(); y_cursor = A4[1] - 80
         y_cursor -= draw_paragraph(c, f"Breakdown for Lake {lake_id}", header_style, 40, y_cursor, A4[0]-80, 50)
         table_data = [['Parameter', 'Raw Val', 'Norm Pres.', 'Norm Trend', 'Norm P-Val', 'Factor Score', 'Weight', 'Contrib.']]
-        for param, details in sorted(calc_details[lake_id].items()):
+        for param, details in sorted(calc_details.get(lake_id, {}).items()):
              table_data.append([param[:18], f"{details.get('Raw Value', 0):.2f}", f"{details.get('Norm Pres.', 0):.3f}", f"{details.get('Norm Trend', 'N/A')}" if isinstance(details.get('Norm Trend'), str) else f"{details.get('Norm Trend', 0):.3f}", f"{details.get('Norm P-Val', 'N/A')}" if isinstance(details.get('Norm P-Val'), str) else f"{details.get('Norm P-Val', 0):.3f}", f"{details.get('Factor Score', 0):.3f}", f"{details.get('Weight', 0):.3f}", f"{details.get('Contribution', 0):.3f}",])
         table = Table(table_data, colWidths=[110, 60, 60, 60, 60, 60, 50, 60])
         table.setStyle(TableStyle([('BACKGROUND', (0,0), (-1,0), colors.darkslategray), ('TEXTCOLOR',(0,0),(-1,0),colors.whitesmoke), ('ALIGN', (0,0), (-1,-1), 'CENTER'), ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'), ('FONTSIZE', (0,0), (-1,-1), 7), ('BOTTOMPADDING', (0,0), (-1,0), 10), ('BACKGROUND', (0,1), (-1,-1), colors.antiquewhite), ('GRID', (0,0), (-1,-1), 1, colors.black)]))
         w, h = table.wrap(A4[0]-80, y_cursor)
-        if y_cursor < h: c.showPage(); y_cursor = A4[1] - 80
+        if y_cursor < h + 40: c.showPage(); y_cursor = A4[1] - 80
         table.drawOn(c, 40, y_cursor - h); y_cursor -= (h + 20)
     c.showPage()
 
@@ -497,8 +489,6 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
 
     # --- Case Study Page ---
     c.bookmarkPage('case_study')
-    y_cursor = A4[1] - 50
-    y_cursor -= draw_paragraph(c, "Case Study Analysis", title_style, 40, y_cursor, A4[0]-80, 100)
     case_study_figures = [
         plot_radar_chart(calc_details, tuple(lake_ids)), 
         plot_health_score_evolution(df, selected_ui_options, tuple(lake_ids)), 
@@ -510,6 +500,7 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
         if i > 0 : c.showPage()
         title, buf, _ = fig_data
         data_summary = f"Analysis of lakes {lake_ids} with parameters {selected_ui_options}."
+        ai_prompt = build_figure_specific_ai_prompt(title, data_summary)
         ai_narrative = generate_ai_insight(ai_prompt).replace('\n', '<br/>')
         y_cursor = A4[1] - 80
         y_cursor -= draw_paragraph(c, title, header_style, 40, y_cursor, A4[0]-80, 100)
@@ -517,7 +508,6 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
         y_cursor -= (A4[1] * 0.5 + 20)
         draw_paragraph(c, ai_narrative, justified_style, 40, y_cursor, A4[0]-80, A4[1]*0.4 - 40)
     
-    # Finalize the PDF
     c.save()
     
     buffer.seek(0)
@@ -577,8 +567,10 @@ with col2:
                     current_ids.add(lake_to_add)
                     st.session_state.lake_id_text = ", ".join(map(str, sorted(list(current_ids))))
                     st.session_state.pop('analysis_complete', None)
-                    st.rerun()
-        
+                    # FIX: Remove st.rerun() to prevent frontend JS errors
+                    # The script will rerun naturally after the button click.
+                    # st.rerun() 
+
         st.text_area("Selected Lakes (manual entry):", key="lake_id_text", height=100, on_change=lambda: st.session_state.pop('analysis_complete', None))
         
         try:
