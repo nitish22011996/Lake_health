@@ -131,14 +131,16 @@ def calculate_lake_health_score(_df, selected_ui_options):
         total_score += final_weights[param] * factor_score_result
     latest_year_data['Health Score'] = total_score
     
+    # Ranks are now relative ONLY to the lakes being analyzed in the current batch.
     latest_year_data['Rank'] = latest_year_data['Health Score'].rank(
         ascending=False, method='min', na_option='bottom'
     ).fillna(0).astype(int)
     
     return latest_year_data.reset_index().sort_values('Rank'), calculation_details
 
+# FIX: Added lake_ids to signature to ensure cache is unique per run
 @st.cache_data
-def calculate_historical_scores(_df_full, selected_ui_options):
+def calculate_historical_scores(_df_full, selected_ui_options, lake_ids):
     df_full = _df_full.copy()
     if df_full.empty: return pd.DataFrame()
     all_historical_data = []
@@ -200,7 +202,7 @@ def generate_grouped_plots_by_metric(_df, lake_ids, metrics):
     return grouped_images
 
 @st.cache_data
-def plot_radar_chart(calc_details):
+def plot_radar_chart(calc_details, lake_ids):
     if not calc_details: return None, None, None
     params = sorted(list(next(iter(calc_details.values())).keys()))
     wrapped_params = [ '\n'.join(textwrap.wrap(p, 15)) for p in params ]
@@ -222,10 +224,10 @@ def plot_radar_chart(calc_details):
     return "Figure 1: Lake Health Fingerprint", buf, False
 
 @st.cache_data
-def plot_health_score_evolution(_df, confirmed_params):
-    historical_scores = calculate_historical_scores(_df, confirmed_params)
+def plot_health_score_evolution(_df, confirmed_params, lake_ids):
+    historical_scores = calculate_historical_scores(_df, confirmed_params, lake_ids)
     if historical_scores.empty: return None, None, None
-    lake_ids = sorted(historical_scores['Lake_ID'].unique())
+    
     n_lakes = len(lake_ids)
     ncols = min(n_lakes, 3); nrows = (n_lakes - 1) // ncols + 1
     fig, axes = plt.subplots(nrows, ncols, figsize=(4.5 * ncols, 3.5 * nrows), dpi=150, sharey=True)
@@ -244,8 +246,8 @@ def plot_health_score_evolution(_df, confirmed_params):
     return "Figure 2: Evolution of Overall Health Score", buf, False
 
 @st.cache_data
-def plot_holistic_trajectory_matrix(_df, _results, confirmed_params):
-    historical_scores = calculate_historical_scores(_df, confirmed_params)
+def plot_holistic_trajectory_matrix(_df, _results, confirmed_params, lake_ids):
+    historical_scores = calculate_historical_scores(_df, confirmed_params, lake_ids)
     if historical_scores.empty: return None, None, None
     trends = historical_scores.groupby('Lake_ID').apply(lambda x: linregress(x['Year'], x['Health Score']).slope if len(x['Year'].unique()) > 1 else 0)
     plot_df = _results.set_index('Lake_ID').copy(); plot_df['Overall Trend'] = trends
@@ -264,7 +266,7 @@ def plot_holistic_trajectory_matrix(_df, _results, confirmed_params):
     return "Figure 3: Holistic Lake Trajectory", buf, False
 
 @st.cache_data
-def plot_hdi_vs_health_correlation(_results):
+def plot_hdi_vs_health_correlation(_results, lake_ids):
     fig, ax = plt.subplots(figsize=(10, 7), dpi=150)
     if 'HDI' not in _results.columns or _results['HDI'].isnull().all():
         ax.text(0.5, 0.5, 'HDI data not available for this analysis.', ha='center', va='center')
@@ -281,7 +283,7 @@ def plot_hdi_vs_health_correlation(_results):
     return "Figure 4: HDI vs. Lake Health", buf, False
 
 @st.cache_data
-def build_detailed_ai_prompt(results, calc_details):
+def build_detailed_ai_prompt(results, calc_details, lake_ids):
     prompt = ("You are an expert environmental data analyst. Your goal is to provide qualitative insights, not just quantitative comparisons. "
               "Generate a detailed comparative analysis of the following lakes based on their health parameters. For each parameter group (e.g., Climate, Water Quality), "
               "identify the 'best-in-class' and 'most-at-risk' lakes. Explain the *implications* of these differences. Use numbers only to support your qualitative statements.\n\n"
@@ -336,13 +338,13 @@ class NumberedCanvas(canvas.Canvas):
 
     def save(self):
         """FIX: Add the last page's state before creating the page numbers."""
-        # This captures the state of the last page, which wasn't being saved before.
-        self._saved_page_states.append(dict(self.__dict__))
+        self.showPage() # Save the state of the current (last) page
         
         num_pages = len(self._saved_page_states)
-        for state in self._saved_page_states:
+        for i, state in enumerate(self._saved_page_states):
             self.__dict__.update(state)
-            self.draw_page_number(num_pages)
+            if i < num_pages - 1: # Don't draw number on the last (blank) page
+                self.draw_page_number(num_pages - 1)
             canvas.Canvas.showPage(self)
         canvas.Canvas.save(self)
 
@@ -351,15 +353,15 @@ class NumberedCanvas(canvas.Canvas):
         self.drawRightString(A4[0] - 20, 20, f"Page {self._pageNumber} of {page_count}")
 
 def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selected_ui_options):
-    # Sanitize all inputs to ensure they only contain data for the selected lakes
     results = results[results['Lake_ID'].isin(lake_ids)].copy()
     calc_details = {k: v for k, v in calc_details.items() if k in lake_ids}
     lake_ids = sorted(results['Lake_ID'].unique())
 
     if not lake_ids:
+        # Fallback for no data
         buffer = BytesIO()
         c = canvas.Canvas(buffer, pagesize=A4)
-        c.drawString(100, A4[1] - 100, "Error: No data available for the selected lakes to generate a report.")
+        c.drawString(100, A4[1] - 100, "Error: No data available to generate a report.")
         c.save()
         buffer.seek(0)
         return buffer
@@ -387,10 +389,8 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
     final_weights = get_effective_weights(selected_ui_options, df.columns)
     params_to_plot = sorted([p for p in final_weights.keys() if p != 'HDI'])
     
-    bookmarks = [("Health Score Ranking", "ranking", 0)]
-    bookmarks.append(("AI-Powered Detailed Comparison", "ai_comparison", 0))
-    bookmarks.append(("Health Score Calculation Breakdown", "breakdown", 0))
-    bookmarks.append(("Parameter Trend Plots", "parameter_plots", 0))
+    bookmarks = [("Health Score Ranking", "ranking", 0), ("AI-Powered Detailed Comparison", "ai_comparison", 0),
+                 ("Health Score Calculation Breakdown", "breakdown", 0), ("Parameter Trend Plots", "parameter_plots", 0)]
     for p in params_to_plot:
         bookmarks.append((f"Trend for: {p}", f"plot_{p.replace(' ', '_')}", 1))
     bookmarks.append(("Case Study Analysis", "case_study", 0))
@@ -400,15 +400,13 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
         c.drawString(60 + (level*20), y_cursor, title)
         c.linkRect("", key, (50, y_cursor - 5, 550, y_cursor + 15), relative=1, thickness=0)
         y_cursor -= 20
-
     c.showPage()
     
-    # --- Page 2: Ranking ---
+    # --- Ranking Page ---
     c.bookmarkPage('ranking')
     y_cursor = A4[1] - 80
     y_cursor -= draw_paragraph(c, "Health Score Ranking", header_style, 40, y_cursor, A4[0]-80, 50)
-    y_cursor -= draw_paragraph(c, "Scores are calculated on a normalized scale from 0 (lowest health) to 1 (highest health).", subtitle_style, 40, y_cursor, A4[0]-80, 50)
-    
+    y_cursor -= draw_paragraph(c, "Scores calculated from 0 (lowest health) to 1 (highest health).", subtitle_style, 40, y_cursor, A4[0]-80, 50)
     bar_start_x = 60; bar_height = 18; max_bar_width = A4[0] - bar_start_x - 150
     for _, row in results.iterrows():
         if y_cursor < 150: c.showPage(); y_cursor = A4[1] - 80
@@ -417,7 +415,6 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
         c.setFillColor(color); c.rect(bar_start_x, y_cursor - bar_height, max(0, score) * max_bar_width, bar_height, fill=1, stroke=0)
         c.setFillColor(colors.black); c.setFont("Helvetica", 9); c.drawString(bar_start_x + 5, y_cursor - bar_height + 5, f"Lake {row['Lake_ID']} (Rank {rank}) - Score: {score:.3f}")
         y_cursor -= (bar_height + 10)
-
     y_cursor -= 20
     c.setFont("Helvetica-Bold", 10); c.drawString(bar_start_x, y_cursor, "Legend:")
     y_cursor -= 15; c.setFillColor(colors.darkgreen); c.rect(bar_start_x, y_cursor, 10, 10, fill=1)
@@ -426,14 +423,37 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
     c.setFillColor(colors.black); c.drawString(bar_start_x + 15, y_cursor, "Moderate (0.5 < Score <= 0.75)")
     y_cursor -= 15; c.setFillColor(colors.firebrick); c.rect(bar_start_x, y_cursor, 10, 10, fill=1)
     c.setFillColor(colors.black); c.drawString(bar_start_x + 15, y_cursor, "Poor (Score <= 0.5)")
-    
-    # --- Subsequent Pages ---
-    c.showPage(); c.bookmarkPage('ai_comparison')
-    ai_prompt = build_detailed_ai_prompt(results, calc_details); ai_narrative = generate_ai_insight(ai_prompt)
+    c.showPage()
+
+    # --- AI Comparison Page with Overflow Handling ---
+    c.bookmarkPage('ai_comparison')
     draw_paragraph(c, "AI-Powered Detailed Comparison", title_style, 40, A4[1] - 50, A4[0] - 80, 100)
-    draw_paragraph(c, ai_narrative, justified_style, 40, A4[1] - 120, A4[0] - 80, A4[1] - 160)
+    ai_prompt = build_detailed_ai_prompt(results, calc_details, lake_ids)
+    ai_narrative = generate_ai_insight(ai_prompt).replace('\n', '<br/>')
     
-    c.showPage(); c.bookmarkPage('breakdown')
+    # FIX: Logic to handle long text overflowing the page
+    story = [Paragraph(ai_narrative, justified_style)]
+    page_top_margin = 120; page_bottom_margin = 60
+    page_width = A4[0] - 80; x_pos = 40
+    y_cursor = A4[1] - page_top_margin
+    
+    while story:
+        p = story.pop(0)
+        frag = p.split(page_width, y_cursor - page_bottom_margin)
+        if len(frag) < 2: # It fits on the current page
+            p.wrapOn(c, page_width, y_cursor)
+            p.drawOn(c, x_pos, y_cursor - p.height)
+        else: # It doesn't fit, split it
+            p_fits = frag[0]
+            p_fits.wrapOn(c, page_width, y_cursor)
+            p_fits.drawOn(c, x_pos, y_cursor - p_fits.height)
+            story.insert(0, frag[1]) # Put the rest back in the story
+            c.showPage() # Create a new page
+            y_cursor = A4[1] - page_top_margin # Reset y_cursor for new page
+    c.showPage()
+    
+    # --- Breakdown Page ---
+    c.bookmarkPage('breakdown')
     y_cursor = A4[1] - 50
     y_cursor -= draw_paragraph(c, "Health Score Calculation Breakdown", title_style, 40, y_cursor, A4[0]-80, 100)
     for lake_id in lake_ids:
@@ -444,11 +464,13 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
         table = Table(table_data, colWidths=[110, 60, 60, 60, 60, 60, 50, 60])
         table.setStyle(TableStyle([('BACKGROUND', (0,0), (-1,0), colors.darkslategray), ('TEXTCOLOR',(0,0),(-1,0),colors.whitesmoke), ('ALIGN', (0,0), (-1,-1), 'CENTER'), ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'), ('FONTSIZE', (0,0), (-1,-1), 7), ('BOTTOMPADDING', (0,0), (-1,0), 10), ('BACKGROUND', (0,1), (-1,-1), colors.antiquewhite), ('GRID', (0,0), (-1,-1), 1, colors.black)]))
         table_height = table.wrap(A4[0]-80, A4[1])[1]
-        if y_cursor < table_height + 40: c.showPage(); y_cursor = A4[1] - 80
+        if y_cursor < table_height + 60: c.showPage(); y_cursor = A4[1] - 80
         y_cursor -= draw_paragraph(c, f"Breakdown for Lake {lake_id}", header_style, 40, y_cursor, 200, 40)
         table.drawOn(c, 40, y_cursor - table_height); y_cursor -= (table_height + 20)
+    c.showPage()
 
-    c.showPage(); c.bookmarkPage("parameter_plots")
+    # --- Parameter Plots Page ---
+    c.bookmarkPage("parameter_plots")
     plots = generate_grouped_plots_by_metric(df, lake_ids, params_to_plot)
     for i, (title, buf, _) in enumerate(plots):
         if i > 0 and i % 2 == 0: c.showPage()
@@ -458,11 +480,19 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
         c.setFont("Helvetica-Bold", 14); c.drawCentredString(A4[0] / 2, y_pos, title)
         c.drawImage(ImageReader(buf), 40, img_y_pos, width=A4[0] - 80, height=A4[1] * 0.45 - 40, preserveAspectRatio=True)
         if i % 2 == 0 and i + 1 < len(plots): c.line(40, A4[1]*0.5 - 40, A4[0] - 40, A4[1]*0.5 - 40)
+    c.showPage()
 
-    c.showPage(); c.bookmarkPage('case_study')
+    # --- Case Study Page ---
+    c.bookmarkPage('case_study')
     y_cursor = A4[1] - 50
     y_cursor -= draw_paragraph(c, "Case Study Analysis", title_style, 40, y_cursor, A4[0]-80, 100)
-    case_study_figures = [plot_radar_chart(calc_details), plot_health_score_evolution(df, selected_ui_options), plot_holistic_trajectory_matrix(df, results, selected_ui_options), plot_hdi_vs_health_correlation(results)]
+    # FIX: Pass lake_ids to cached functions to ensure correct cache behavior
+    case_study_figures = [
+        plot_radar_chart(calc_details, lake_ids), 
+        plot_health_score_evolution(df, selected_ui_options, lake_ids), 
+        plot_holistic_trajectory_matrix(df, results, selected_ui_options, lake_ids), 
+        plot_hdi_vs_health_correlation(results, lake_ids)
+    ]
     for i, fig_data in enumerate(case_study_figures):
         if fig_data is None or fig_data[1] is None: continue
         if i > 0 : c.showPage()
@@ -486,7 +516,6 @@ st.title("Lake Health Report")
 df_health_full, df_location, ui_options = prepare_all_data(HEALTH_DATA_PATH, LOCATION_DATA_PATH)
 if df_health_full is None: st.stop()
 
-if 'analysis_complete' not in st.session_state: st.session_state.analysis_complete = False
 if 'confirmed_parameters' not in st.session_state: st.session_state.confirmed_parameters = []
 if 'lake_id_text' not in st.session_state: st.session_state.lake_id_text = ""
 
@@ -506,8 +535,7 @@ with col1:
             
             if st.form_submit_button("Set Parameters", use_container_width=True):
                 st.session_state.confirmed_parameters = [p for p, selected in temp_selections.items() if selected]
-                # FIX: Clear old results when parameters change
-                st.session_state.analysis_complete = False
+                st.session_state.pop('analysis_complete', None)
                 st.session_state.pop('analysis_results', None)
                 st.session_state.pop('pdf_buffer', None)
                 st.rerun()
@@ -536,13 +564,10 @@ with col2:
                     current_ids = set(int(x.strip()) for x in st.session_state.lake_id_text.split(',') if x.strip())
                     current_ids.add(lake_to_add)
                     st.session_state.lake_id_text = ", ".join(map(str, sorted(list(current_ids))))
-                    # FIX: Clear old results when lake selection changes
-                    st.session_state.analysis_complete = False
-                    st.session_state.pop('analysis_results', None)
-                    st.session_state.pop('pdf_buffer', None)
+                    st.session_state.pop('analysis_complete', None)
                     st.rerun()
         
-        st.text_area("Selected Lakes (manual entry):", key="lake_id_text", height=100, on_change=lambda: st.session_state.update(analysis_complete=False))
+        st.text_area("Selected Lakes (manual entry):", key="lake_id_text", height=100, on_change=lambda: st.session_state.pop('analysis_complete', None))
         
         try:
             lake_ids_to_analyze_initial = sorted([int(x.strip()) for x in st.session_state.lake_id_text.split(',') if x.strip()])
@@ -554,22 +579,19 @@ with col2:
         st.subheader("3. Run Analysis")
         is_disabled = not lake_ids_to_analyze_initial or not st.session_state.confirmed_parameters
         if st.button("🚀 Analyze Selected Lakes", disabled=is_disabled, use_container_width=True, type="primary"):
-            # FIX: Clear previous results to ensure a fresh run
-            st.session_state.analysis_complete = False
+            st.session_state.pop('analysis_complete', None)
             st.session_state.pop('analysis_results', None)
             st.session_state.pop('pdf_buffer', None)
 
-            # FIX: Validate selected lakes against the master dataframe
             all_available_lakes = set(df_health_full['Lake_ID'].unique())
             valid_lakes = [lid for lid in lake_ids_to_analyze_initial if lid in all_available_lakes]
             missing_lakes = [lid for lid in lake_ids_to_analyze_initial if lid not in all_available_lakes]
             
             if missing_lakes:
-                st.warning(f"Warning: No health data found for Lake IDs: {', '.join(map(str, missing_lakes))}. They will be excluded.")
+                st.warning(f"Warning: No health data found for Lake IDs: {', '.join(map(str, missing_lakes))}. They will be excluded from the analysis.")
 
             if not valid_lakes:
-                st.error("None of the selected lakes have available health data.")
-                st.session_state.analysis_complete = False
+                st.error("None of the selected lakes have available health data for analysis.")
             else:
                 with st.spinner("Analyzing and generating PDF report..."):
                     try:
@@ -578,18 +600,14 @@ with col2:
                         
                         if results.empty:
                             st.error("Analysis could not be completed for the selected lakes.")
-                            st.session_state.analysis_complete = False
                         else:
                             pdf_buffer = generate_comparative_pdf_report(selected_df, results, calc_details, valid_lakes, st.session_state.confirmed_parameters)
-                            
                             st.session_state.analysis_results = results
                             st.session_state.pdf_buffer = pdf_buffer
                             st.session_state.analysis_complete = True
-
                     except Exception as e: 
                         st.error("A critical error occurred during analysis.")
                         st.exception(e)
-                        st.session_state.analysis_complete = False
 
 # --- COLUMN 3: MAP & RESULTS ---
 with col3:
@@ -613,14 +631,12 @@ with col3:
     with st.container(border=True):
         st.subheader("Results & Downloads")
         if st.session_state.get('analysis_complete'):
-            # Ensure results are not None before displaying
             if 'analysis_results' in st.session_state and st.session_state.analysis_results is not None:
                 st.dataframe(st.session_state.analysis_results[["Lake_ID", "Health Score", "Rank"]].style.format({"Health Score": "{:.3f}"}), use_container_width=True)
                 
                 dl_col1, dl_col2 = st.columns(2)
                 with dl_col1:
                     if 'pdf_buffer' in st.session_state and st.session_state.pdf_buffer:
-                        # Get the final list of lakes that were actually in the report
                         report_lake_ids = st.session_state.analysis_results['Lake_ID'].tolist()
                         st.download_button(
                             label="📄 Download PDF Report", 
