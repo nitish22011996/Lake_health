@@ -395,7 +395,7 @@ def _draw_report_content(c, bookmark_locations=None):
     c.setTitle("Lake Health Report")
     y_cursor = A4[1] - 50
     y_cursor -= draw_paragraph("Lake Health Report", title_style, 40, y_cursor, A4[0] - 80, 100)
-    y_cursor -= 20
+    y_cursor -= 40
     y_cursor -= draw_paragraph("Table of Contents", header_style, 40, y_cursor, A4[0] - 80, 50)
     
     params_to_plot = sorted([p for p in get_effective_weights(selected_ui_options, df.columns).keys() if p != 'HDI'])
