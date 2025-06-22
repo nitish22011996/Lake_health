@@ -16,9 +16,8 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.utils import ImageReader
 from reportlab.lib import colors
-from reportlab.platypus import Paragraph, Table, TableStyle, Spacer
+from reportlab.platypus import Paragraph, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import inch
 from matplotlib.ticker import MaxNLocator
 
 # --- CONFIGURATION ---
@@ -169,8 +168,6 @@ def generate_grouped_plots_by_metric(_df, lake_ids, metrics):
                     slope, intercept, *_ = linregress(x, y); ax.plot(x, intercept + slope * x, linestyle='--', alpha=0.7)
         if not has_data: plt.close(fig); continue
         ax.xaxis.set_major_locator(MaxNLocator(integer=True))
-        # ## IMPROVEMENT: Removed title from plot function to prevent double titles in PDF. Title is now added in the PDF generation code.
-        # ax.set_title(f"Trend for: {metric}", fontsize=16, pad=15)
         ax.set_xlabel("Year", fontsize=12); ax.set_ylabel(metric, fontsize=12)
         ax.legend(); ax.grid(True, which='both', linestyle='--', linewidth=0.5)
         plt.tight_layout()
@@ -293,7 +290,8 @@ def generate_ai_insight(prompt):
     if not API_KEY: return "Error: API Key not found. Please configure it in Streamlit secrets."
     API_URL = "https://openrouter.ai/api/v1/chat/completions"
     headers = {"Authorization": f"Bearer {API_KEY}"}
-    data = {"model": "openai/gpt-3.5-turbo", "messages": [{"role": "user", "content": prompt}]} # Using a standard model for reliability
+    # ## RESTORED MODEL: Changed back to DeepSeek as requested.
+    data = {"model": "deepseek/deepseek-chat:free", "messages": [{"role": "user", "content": prompt}]}
     try:
         response = requests.post(API_URL, json=data, headers=headers, timeout=90)
         response.raise_for_status()
@@ -307,8 +305,6 @@ def generate_ai_insight(prompt):
 def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selected_ui_options):
     buffer = BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
-    
-    # --- STYLES (Beautified) ---
     styles = getSampleStyleSheet()
     title_style = ParagraphStyle(name='Title', parent=styles['h1'], alignment=1, fontSize=22, spaceAfter=20, textColor=colors.darkblue)
     header_style = ParagraphStyle(name='Header', parent=styles['h2'], alignment=0, fontSize=14, spaceBefore=12, spaceAfter=8, textColor=colors.darkslateblue)
@@ -321,15 +317,11 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
         p.drawOn(canvas_obj, x, y - p.height)
         return p.height
         
-    # --- Page 1: Title and Ranking ---
+    # Page 1: Title and Ranking
     draw_paragraph(c, "Dynamic Lake Health Report", title_style, 40, A4[1] - 50, A4[0] - 80, 100)
     y_cursor = A4[1] - 120
-    draw_paragraph(c, "Health Score Ranking", header_style, 40, y_cursor, A4[0]-80, 50)
-    y_cursor -= 35
-    # ## IMPROVEMENT: Added subtitle explaining the score scale
-    draw_paragraph(c, "Scores are calculated on a normalized scale from 0 (lowest health) to 1 (highest health).", subtitle_style, 40, y_cursor, A4[0]-80, 50)
-    y_cursor -= 40
-    
+    draw_paragraph(c, "Health Score Ranking", header_style, 40, y_cursor, A4[0]-80, 50); y_cursor -= 35
+    draw_paragraph(c, "Scores are calculated on a normalized scale from 0 (lowest health) to 1 (highest health).", subtitle_style, 40, y_cursor, A4[0]-80, 50); y_cursor -= 40
     bar_start_x = 60; bar_height = 18; max_bar_width = A4[0] - bar_start_x - 150
     for _, row in results.iterrows():
         if y_cursor < 80: c.showPage(); y_cursor = A4[1] - 80
@@ -339,7 +331,7 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
         c.setFillColor(colors.black); c.setFont("Helvetica", 9); c.drawString(bar_start_x + 5, y_cursor - bar_height + 5, f"Lake {row['Lake_ID']} (Rank {rank}) - Score: {score:.3f}")
         y_cursor -= (bar_height + 10)
 
-    # --- Page 2: Detailed AI Comparison ---
+    # Page 2: Detailed AI Comparison
     c.showPage()
     with st.spinner("Generating detailed AI parameter analysis..."):
         ai_prompt = build_detailed_ai_prompt(results, calc_details)
@@ -347,7 +339,7 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
     draw_paragraph(c, "AI-Powered Detailed Comparison", title_style, 40, A4[1] - 50, A4[0] - 80, 100)
     draw_paragraph(c, ai_narrative, justified_style, 40, A4[1] - 120, A4[0] - 80, A4[1] - 160)
     
-    # --- Page 3: Calculation Breakdown Table ---
+    # Page 3: Calculation Breakdown Table
     c.showPage()
     y_cursor = A4[1] - 50
     draw_paragraph(c, "Health Score Calculation Breakdown", title_style, 40, y_cursor, A4[0]-80, 100); y_cursor -= 80
@@ -362,7 +354,7 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
         draw_paragraph(c, f"Breakdown for Lake {lake_id}", header_style, 40, y_cursor, 200, 40); y_cursor -= 40
         table.drawOn(c, 40, y_cursor - table_height); y_cursor -= (table_height + 20)
     
-    # --- Pages 4+: Individual Parameter Plots ---
+    # Pages 4+: Individual Parameter Plots
     final_weights = get_effective_weights(selected_ui_options, df.columns)
     params_to_plot = sorted([p for p in final_weights.keys() if p != 'HDI'])
     plots = generate_grouped_plots_by_metric(df, lake_ids, params_to_plot)
@@ -373,53 +365,38 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
         c.drawImage(ImageReader(buf1), 40, A4[1] * 0.5 - 20, width=A4[0] - 80, height=A4[1] * 0.45, preserveAspectRatio=True)
         if i + 1 < len(plots):
             title2, buf2, _ = plots[i + 1]
-            c.line(40, A4[1]*0.5 - 40, A4[0] - 40, A4[1]*0.5 - 40) # Divider line
+            c.line(40, A4[1]*0.5 - 40, A4[0] - 40, A4[1]*0.5 - 40)
             c.setFont("Helvetica-Bold", 14); c.drawCentredString(A4[0] / 2, A4[1] * 0.5 - 60, title2)
             c.drawImage(ImageReader(buf2), 40, 20, width=A4[0] - 80, height=A4[1] * 0.45 - 40, preserveAspectRatio=True)
 
-    # --- Case Study Section (Beautified & Fixed) ---
+    # Case Study Section
     c.showPage()
     y_cursor = A4[1] - 50
     y_cursor -= draw_paragraph(c, "Case Study Analysis", title_style, 40, y_cursor, A4[0]-80, 100)
-    y_cursor -= 20 # Extra space
+    y_cursor -= 20
     
     with st.spinner("Generating case study figures and insights..."):
-        case_study_figures = [
-            plot_radar_chart(calc_details),
-            plot_health_score_evolution(df, selected_ui_options),
-            plot_holistic_trajectory_matrix(df, results, selected_ui_options),
-            plot_hdi_vs_health_correlation(results)
-        ]
-        
+        case_study_figures = [plot_radar_chart(calc_details), plot_health_score_evolution(df, selected_ui_options), plot_holistic_trajectory_matrix(df, results, selected_ui_options), plot_hdi_vs_health_correlation(results)]
         for i, fig_data in enumerate(case_study_figures):
             if fig_data is None or fig_data[1] is None: continue
             title, buf, is_landscape = fig_data
-            
-            # ## IMPROVEMENT: Only add a new page *after* the first figure in this section
-            if i > 0:
-                c.showPage()
-                y_cursor = A4[1] - 50
-
-            # Build prompt and get AI insight for this specific figure
-            data_summary = f"Analysis of lakes {lake_ids} with parameters {selected_ui_options}." # More useful summary
+            if i > 0: c.showPage(); y_cursor = A4[1] - 50
+            data_summary = f"Analysis of lakes {lake_ids} with parameters {selected_ui_options}."
             ai_prompt = build_figure_specific_ai_prompt(title, data_summary)
             ai_narrative = generate_ai_insight(ai_prompt)
-
-            # Draw Figure and AI text
             page_width, page_height = (landscape(A4) if is_landscape else A4)
             if is_landscape: c.setPageSize((page_width, page_height))
-            
             y_cursor -= draw_paragraph(c, title, header_style, 40, y_cursor, page_width-80, 100)
             c.drawImage(ImageReader(buf), 40, y_cursor - (page_height * 0.5), width=page_width-80, height=page_height * 0.5, preserveAspectRatio=True)
             y_cursor -= (page_height * 0.5 + 20)
             draw_paragraph(c, ai_narrative, justified_style, 40, y_cursor, page_width-80, page_height*0.4 - 40)
-            
             if is_landscape: c.setPageSize(A4)
 
     c.save(); buffer.seek(0)
     return buffer
 
-# --- STREAMLIT APP LAYOUT (Beautified) ---
+
+# --- STREAMLIT APP LAYOUT ---
 st.set_page_config(layout="wide")
 st.title("🌊 Dynamic Lake Health Dashboard")
 
@@ -428,17 +405,27 @@ if df_health_full is None: st.stop()
 
 # Initialize session state
 if 'confirmed_parameters' not in st.session_state: st.session_state.confirmed_parameters = []
-if "selected_lake_ids" not in st.session_state: st.session_state.selected_lake_ids = []
+if "selected_lake_ids" not in st.session_state: st.session_state.selected_lake_ids = sorted([])
 if 'analysis_results' not in st.session_state: st.session_state.analysis_results = None
 
 with st.sidebar:
-    st.header("1. Configure Analysis")
-    temp_selected_params = st.multiselect("Choose parameters for health score:", options=ui_options, default=st.session_state.get('confirmed_parameters', []))
+    st.header("1. Select Parameters")
+    st.markdown("Choose parameters for the health score:")
+    
+    param_selections = {}
+    for param in ui_options:
+        param_selections[param] = st.checkbox(
+            param, 
+            value=(param in st.session_state.confirmed_parameters), 
+            key=f"param_{param}"
+        )
+
     if st.button("Set Parameters", use_container_width=True):
-        st.session_state.confirmed_parameters = temp_selected_params; st.session_state.analysis_results = None; st.rerun()
+        st.session_state.confirmed_parameters = [p for p, selected in param_selections.items() if selected]
+        st.session_state.analysis_results = None
+        st.rerun()
     
     if st.session_state.confirmed_parameters:
-        # ## IMPROVEMENT: Removed expander for a more compact display
         param_str = ", ".join(f"`{p}`" for p in st.session_state.confirmed_parameters)
         st.info(f"**Active Parameters:** {param_str}")
 
@@ -453,7 +440,6 @@ with st.sidebar:
     
     if lake_ids_in_district:
         selected_lake_id = st.selectbox("Select a Lake ID to Add", lake_ids_in_district)
-        # ## IMPROVEMENT: Changed button text as requested
         if st.button("Add Lake for Comparison", use_container_width=True):
             if selected_lake_id not in st.session_state.selected_lake_ids: 
                 st.session_state.selected_lake_ids.append(selected_lake_id)
@@ -463,7 +449,6 @@ with st.sidebar:
     else: 
         st.warning("No lakes found in this district.")
 
-# ## IMPROVEMENT: Switched to two equal columns for a balanced, no-scroll layout
 col1, col2 = st.columns(2)
 
 with col1:
@@ -473,24 +458,19 @@ with col1:
         m = folium.Map(location=map_center, zoom_start=8)
         marker_cluster = MarkerCluster().add_to(m)
         for _, row in filtered_lakes_by_loc.iterrows():
-            folium.Marker(
-                [row['Lat'], row['Lon']], 
-                popup=f"<b>Lake ID:</b> {row['Lake_ID']}", 
-                tooltip=f"Lake ID: {row['Lake_ID']}", 
-                icon=folium.Icon(color='blue', icon='water')
-            ).add_to(marker_cluster)
-        st_folium(m, height=450, use_container_width=True)
+            folium.Marker([row['Lat'], row['Lon']], popup=f"<b>Lake ID:</b> {row['Lake_ID']}", tooltip=f"Lake ID: {row['Lake_ID']}", icon=folium.Icon(color='blue', icon='water')).add_to(marker_cluster)
+        st_folium(m, height=480, use_container_width=True)
 
 with col2:
     st.subheader("🔬 Lakes Selected for Analysis")
     ids_text = ", ".join(map(str, st.session_state.selected_lake_ids))
-    edited_ids_text = st.text_area("Edit Lake IDs (comma-separated)", ids_text, height=50)
+    edited_ids_text = st.text_area("Edit Lake IDs (comma-separated)", ids_text, height=50, key="lake_id_editor")
     
     try:
-        updated_ids = sorted([int(x.strip()) for x in edited_ids_text.split(",") if x.strip()]) if edited_ids_text else []
-        if updated_ids != st.session_state.selected_lake_ids: 
+        current_ids_in_box = sorted([int(x.strip()) for x in edited_ids_text.split(",") if x.strip()]) if edited_ids_text else []
+        if current_ids_in_box != st.session_state.selected_lake_ids:
+            st.session_state.selected_lake_ids = current_ids_in_box
             st.session_state.analysis_results = None
-            st.session_state.selected_lake_ids = updated_ids
             st.rerun()
     except (ValueError, TypeError): 
         st.warning("Invalid input. Please enter comma-separated numbers.")
@@ -499,7 +479,7 @@ with col2:
     is_disabled = not lake_ids_to_analyze or not st.session_state.confirmed_parameters
     
     if st.button("🚀 Analyze Selected Lakes", disabled=is_disabled, use_container_width=True, type="primary"):
-        st.session_state.analysis_results = None # Clear previous results
+        st.session_state.analysis_results = None
         with st.spinner("Analyzing... This may take a moment."):
             try:
                 selected_df = df_health_full[df_health_full["Lake_ID"].isin(lake_ids_to_analyze)].copy()
@@ -509,7 +489,6 @@ with col2:
                     results, calc_details = calculate_lake_health_score(selected_df, st.session_state.confirmed_parameters)
                     st.session_state.analysis_results = results
                     st.session_state.calc_details = calc_details
-                    # PDF is now generated on-demand
             except Exception as e: 
                 st.error(f"A critical error occurred during analysis.")
                 st.exception(e)
@@ -521,23 +500,10 @@ with col2:
         st.dataframe(st.session_state.analysis_results[["Lake_ID", "Health Score", "Rank"]].style.format({"Health Score": "{:.3f}"}), use_container_width=True)
         st.subheader("📥 Download Center")
 
-        # Generate PDF on-demand when the button is clicked
         if st.button("📄 Generate & Download Full PDF Report", use_container_width=True):
              with st.spinner("Generating PDF Report... Please wait."):
-                pdf_buffer = generate_comparative_pdf_report(
-                    df_health_full[df_health_full["Lake_ID"].isin(lake_ids_to_analyze)], 
-                    st.session_state.analysis_results, 
-                    st.session_state.calc_details, 
-                    lake_ids_to_analyze, 
-                    st.session_state.confirmed_parameters
-                )
-                st.download_button(
-                    label="✅ Click to Download PDF",
-                    data=pdf_buffer,
-                    file_name=f"Full_Report_{'_'.join(map(str, lake_ids_to_analyze))}.pdf",
-                    mime="application/pdf",
-                    use_container_width=True
-                )
+                pdf_buffer = generate_comparative_pdf_report(df_health_full[df_health_full["Lake_ID"].isin(lake_ids_to_analyze)], st.session_state.analysis_results, st.session_state.calc_details, lake_ids_to_analyze, st.session_state.confirmed_parameters)
+                st.download_button(label="✅ Click to Download PDF", data=pdf_buffer, file_name=f"Full_Report_{'_'.join(map(str, lake_ids_to_analyze))}.pdf", mime="application/pdf", use_container_width=True)
 
         csv_data = df_health_full[df_health_full["Lake_ID"].isin(lake_ids_to_analyze)].to_csv(index=False).encode('utf-8')
         st.download_button("📥 Download Filtered Data (CSV)", csv_data, f"data_{'_'.join(map(str, lake_ids_to_analyze))}.csv", "text/csv", use_container_width=True)
