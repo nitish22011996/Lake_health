@@ -153,6 +153,7 @@ def calculate_lake_health_score(_df, selected_ui_options, lake_ids_tuple):
     
     return final_results, calculation_details
 
+# REPLACEMENT FUNCTION (Version 2 - Bug Fixed)
 @st.cache_data
 def calculate_historical_scores(_df_full, selected_ui_options, lake_ids_tuple):
     df_full = _df_full.copy()
@@ -162,23 +163,20 @@ def calculate_historical_scores(_df_full, selected_ui_options, lake_ids_tuple):
     final_weights = get_effective_weights(selected_ui_options, df_full.columns)
     params_to_process = list(final_weights.keys())
 
-    # --- START OF FIX: Pre-calculate GLOBAL normalization boundaries ---
+    # --- Pre-calculate GLOBAL normalization boundaries ---
     bounds = {}
     df_imputed_full = df_full.copy()
     for param in params_to_process:
         if param in df_imputed_full.columns:
-            # Impute missing values on the entire dataset first
             df_imputed_full = df_imputed_full.sort_values(by=['Lake_ID', 'Year'])
             df_imputed_full[param] = df_imputed_full.groupby('Lake_ID')[param].transform(lambda x: x.bfill().ffill())
             df_imputed_full[param] = df_imputed_full[param].fillna(df_imputed_full[param].median())
 
-            # Get global min/max for the raw parameter values
             value_min = df_imputed_full[param].min()
             value_max = df_imputed_full[param].max()
 
             slope_min, slope_max = 0, 0
             if param != 'HDI':
-                 # Calculate all possible final slopes to find the global min/max slope
                 all_slopes = df_imputed_full.groupby('Lake_ID').apply(
                     lambda x: linregress(x['Year'], x[param]).slope if len(x['Year'].unique()) > 1 else 0
                 )
@@ -189,10 +187,10 @@ def calculate_historical_scores(_df_full, selected_ui_options, lake_ids_tuple):
                 'value_min': value_min, 'value_max': value_max,
                 'slope_min': slope_min, 'slope_max': slope_max
             }
-    # --- END OF FIX ---
 
     def norm(val, v_min, v_max):
         if v_max == v_min: return 0.5
+        # This now works on both single values (floats) and Series
         return (val - v_min) / (v_max - v_min)
 
     all_historical_data = []
@@ -202,13 +200,69 @@ def calculate_historical_scores(_df_full, selected_ui_options, lake_ids_tuple):
         df_subset = df_imputed_full[df_imputed_full['Year'] <= year].copy()
         if df_subset.empty: continue
 
-        # Get the data for the specific 'year' we are calculating for
         current_year_data = df_subset.loc[df_subset.groupby('Lake_ID')['Year'].idxmax()].set_index('Lake_ID')
-        total_score_for_year = pd.Series(0.0, index=current_year_data.index)
+        total_score_for_year = pd.Series(0.0, index=current_year_data.index) if len(current_year_data.index) > 1 else 0.0
 
         for param in params_to_process:
             if param not in current_year_data.columns: continue
 
+            props = PARAMETER_PROPERTIES[param]
+            b = bounds[param]
+
+            raw_values = current_year_data[param]
+            pv_score = norm(raw_values, b['value_min'], b['value_max'])
+            if props['impact'] == 'negative':
+                pv_score = 1.0 - pv_score
+
+            if param == 'HDI':
+                factor_score = pv_score
+            else:
+                trends = df_subset.groupby('Lake_ID').apply(
+                    lambda x: linregress(x['Year'], x[param]) if len(x['Year'].unique()) > 1 else (0,0,0,1,0)
+                )
+                slopes = trends.apply(lambda x: x.slope if not isinstance(x, tuple) else x[0])
+                p_values = trends.apply(lambda x: x.pvalue if not isinstance(x, tuple) else x[3])
+
+                slope_score = norm(slopes, b['slope_min'], b['slope_max'])
+                if props['impact'] == 'negative':
+                    slope_score = 1.0 - slope_score
+
+                if isinstance(p_values, pd.Series):
+                    p_value_score = 1.0 - ( (p_values - p_values.min()) / (p_values.max() - p_values.min()) if p_values.max() != p_values.min() else 0.5)
+                else: # It's a single float
+                     p_value_score = 0.5 # A single p-value has no context, so we assign a neutral score
+
+                # --- START OF FIX ---
+                # Safely handle slope_score and p_value_score whether they are a Series or a float
+                safe_slope_score = slope_score.fillna(0.5) if isinstance(slope_score, pd.Series) else slope_score
+                safe_p_value_score = p_value_score.fillna(0.5) if isinstance(p_value_score, pd.Series) else p_value_score
+
+                factor_score = (pv_score + safe_slope_score + safe_p_value_score) / 3.0
+                # --- END OF FIX ---
+
+            total_score_for_year += final_weights[param] * factor_score
+
+        # If only one lake, the result is a float, so we need to rebuild the DataFrame
+        if isinstance(total_score_for_year, float):
+             year_results = pd.DataFrame({
+                'Year': [year],
+                'Lake_ID': [current_year_data.index[0]],
+                'Health Score': [total_score_for_year]
+            })
+        else:
+             year_results = pd.DataFrame({
+                'Year': year,
+                'Lake_ID': total_score_for_year.index,
+                'Health Score': total_score_for_year.values
+            })
+        all_historical_data.append(year_results)
+
+    if not all_historical_data:
+        return pd.DataFrame()
+
+    historical_df = pd.concat(all_historical_data).reset_index(drop=True)
+    historical_df['Rank'] = historical_df.groupby('Year')['Health Score'].rank(ascending=False, method='min').fillna(0).astype(int)
+    return historical_df
             props = PARAMETER_PROPERTIES[param]
             b = bounds[param]
 
