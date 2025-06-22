@@ -127,10 +127,6 @@ def calculate_lake_health_score(_df, selected_ui_options):
         total_score += final_weights[param] * factor_score_result
     latest_year_data['Health Score'] = total_score
     
-    # --- CRITICAL FIX for IntCastingNaNError ---
-    # The rank method can produce NaNs if the score is NaN.
-    # na_option='bottom' pushes NaNs to the end of the ranking.
-    # .fillna(0) handles any edge cases before converting to integer.
     latest_year_data['Rank'] = latest_year_data['Health Score'].rank(
         ascending=False, method='min', na_option='bottom'
     ).fillna(0).astype(int)
@@ -154,7 +150,7 @@ def calculate_historical_scores(_df_full, selected_ui_options):
     historical_df['Rank'] = historical_df.groupby('Year')['Health Score'].rank(ascending=False, method='min', na_option='bottom').fillna(0).astype(int)
     return historical_df
 
-# --- PLOTTING, AI, and PDF FUNCTIONS (Unchanged) ---
+# --- PLOTTING, AI, and PDF FUNCTIONS ---
 @st.cache_data
 def generate_grouped_plots_by_metric(_df, lake_ids, metrics):
     df = _df.copy()
@@ -329,9 +325,14 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
     bar_start_x = 60; bar_height = 18; max_bar_width = A4[0] - bar_start_x - 150
     for _, row in results.iterrows():
         if y_cursor < 80: c.showPage(); y_cursor = A4[1] - 80
-        score = row['Health Score']; rank = int(row['Rank'])
+        score = row['Health Score']
+        # --- CRITICAL FIX for ValueError ---
+        # Ensure the score used for width is not negative.
+        bar_width = max(0, score) * max_bar_width
+        rank = int(row['Rank'])
         color = colors.darkgreen if score > 0.75 else colors.orange if score > 0.5 else colors.firebrick
-        c.setFillColor(color); c.rect(bar_start_x, y_cursor - bar_height, score * max_bar_width, bar_height, fill=1, stroke=0)
+        c.setFillColor(color)
+        c.rect(bar_start_x, y_cursor - bar_height, bar_width, bar_height, fill=1, stroke=0)
         c.setFillColor(colors.black); c.setFont("Helvetica", 9); c.drawString(bar_start_x + 5, y_cursor - bar_height + 5, f"Lake {row['Lake_ID']} (Rank {rank}) - Score: {score:.3f}")
         y_cursor -= (bar_height + 10)
 
@@ -409,15 +410,12 @@ df_health_full, df_location, ui_options = prepare_all_data(HEALTH_DATA_PATH, LOC
 if df_health_full is None: st.stop()
 
 # --- STATE MANAGEMENT ---
-if 'analysis_results' not in st.session_state:
-    st.session_state.analysis_results = None
-if 'confirmed_parameters' not in st.session_state:
-    st.session_state.confirmed_parameters = []
-if 'selected_lake_ids' not in st.session_state:
-    st.session_state.selected_lake_ids = []
+if 'analysis_results' not in st.session_state: st.session_state.analysis_results = None
+if 'confirmed_parameters' not in st.session_state: st.session_state.confirmed_parameters = []
+if 'selected_lake_ids' not in st.session_state: st.session_state.selected_lake_ids = []
 
 # --- NEW 2-COLUMN LAYOUT (CONTROLS | MAIN CONTENT) ---
-col_controls, col_main = st.columns([1, 2.5]) # Give more space to the main content
+col_controls, col_main = st.columns([1, 2.5])
 
 # --- COLUMN 1: CONTROLS (Static and Always Visible) ---
 with col_controls:
@@ -427,23 +425,19 @@ with col_controls:
     with st.form(key='parameter_form'):
         st.subheader("1. Select Parameters")
         
-        # Use a dictionary to capture the state of checkboxes inside the form
         temp_selections = {}
         for param in ui_options:
-            # The value is pre-filled based on the session state
             temp_selections[param] = st.checkbox(
                 param, 
                 value=(param in st.session_state.confirmed_parameters)
             )
         
-        # The form submit button is the single point of action
         submitted_params = st.form_submit_button("Set Parameters", use_container_width=True)
         if submitted_params:
             st.session_state.confirmed_parameters = [p for p, selected in temp_selections.items() if selected]
-            st.session_state.analysis_results = None  # Reset results on change
-            st.rerun() # Rerun to reflect the new parameter selection immediately
+            st.session_state.analysis_results = None
+            st.rerun()
 
-    # Display confirmed parameters
     if st.session_state.confirmed_parameters:
         st.info(f"**Active Parameters:** {', '.join(f'`{p}`' for p in st.session_state.confirmed_parameters)}")
     else:
@@ -461,17 +455,15 @@ with col_controls:
     
     available_lakes = df_location[(df_location['State'] == selected_state) & (df_location['District'] == selected_district)]['Lake_ID'].unique()
     
-    # st.multiselect is stable for selecting from a list and showing selections
     selected_lakes = st.multiselect(
         "Select lakes for analysis:",
         options=sorted(available_lakes),
         default=st.session_state.selected_lake_ids,
         key="lake_multiselect"
     )
-    # Always sync the session state with the widget's current state
     if selected_lakes != st.session_state.selected_lake_ids:
         st.session_state.selected_lake_ids = selected_lakes
-        st.session_state.analysis_results = None # Reset results
+        st.session_state.analysis_results = None
         st.rerun()
     
     st.markdown("---")
@@ -481,7 +473,7 @@ with col_controls:
     is_disabled = not st.session_state.selected_lake_ids or not st.session_state.confirmed_parameters
     if st.button("🚀 Analyze Selected Lakes", disabled=is_disabled, use_container_width=True, type="primary"):
         st.session_state.analysis_results = None
-        with st.spinner("Analyzing... This may take a moment."):
+        with st.spinner("Analyzing and preparing report..."):
             try:
                 lake_ids_to_analyze = st.session_state.selected_lake_ids
                 selected_df = df_health_full[df_health_full["Lake_ID"].isin(lake_ids_to_analyze)].copy()
@@ -491,13 +483,24 @@ with col_controls:
                     results, calc_details = calculate_lake_health_score(selected_df, st.session_state.confirmed_parameters)
                     st.session_state.analysis_results = results
                     st.session_state.calc_details = calc_details
-                    st.session_state.pdf_buffer = None # Clear old PDF
+                    
+                    # --- AUTOMATIC PDF GENERATION ---
+                    pdf_buffer = generate_comparative_pdf_report(df_health_full[df_health_full["Lake_ID"].isin(lake_ids_to_analyze)], results, calc_details, lake_ids_to_analyze, st.session_state.confirmed_parameters)
+                    st.session_state.pdf_buffer = pdf_buffer
+                    st.session_state.active_tab = "Analysis & Downloads"
+                    st.success("Analysis complete! View results and downloads. →")
             except Exception as e: 
                 st.error(f"A critical error occurred during analysis.")
                 st.exception(e)
 
 # --- COLUMN 2: MAIN CONTENT (MAP & RESULTS) ---
 with col_main:
+    # Set the default tab based on whether analysis has been run
+    default_tab = "Analysis & Downloads" if st.session_state.analysis_results is not None else "📍 Map View"
+    
+    # Streamlit doesn't support programmatically setting tabs, so we guide the user.
+    # The best practice is to show the most relevant information.
+    # Here, we will always show the tabs and let the user click.
     tab_map, tab_results = st.tabs(["📍 Map View", "📊 Analysis & Downloads"])
 
     with tab_map:
@@ -518,7 +521,6 @@ with col_main:
             st_folium(m, height=600, use_container_width=True)
 
     with tab_results:
-        # This section will now render correctly
         if st.session_state.analysis_results is not None and not st.session_state.analysis_results.empty:
             with st.container(border=True):
                 st.subheader("Health Score Results")
@@ -529,23 +531,20 @@ with col_main:
                 dl_col1, dl_col2 = st.columns(2)
                 
                 with dl_col1:
-                    if st.button("📄 Generate Full PDF Report", use_container_width=True):
-                         with st.spinner("Generating PDF Report... Please wait."):
-                            pdf_buffer = generate_comparative_pdf_report(df_health_full[df_health_full["Lake_ID"].isin(st.session_state.selected_lake_ids)], st.session_state.analysis_results, st.session_state.calc_details, st.session_state.selected_lake_ids, st.session_state.confirmed_parameters)
-                            st.session_state.pdf_buffer = pdf_buffer
-                    
+                    # --- DIRECT DOWNLOAD BUTTON ---
                     if 'pdf_buffer' in st.session_state and st.session_state.pdf_buffer is not None:
                         st.download_button(
-                            label="✅ Click to Download PDF", 
+                            label="📄 Download PDF Report", 
                             data=st.session_state.pdf_buffer, 
                             file_name=f"Full_Report_{'_'.join(map(str, st.session_state.selected_lake_ids))}.pdf", 
                             mime="application/pdf", 
                             use_container_width=True
                         )
+                    else:
+                        st.info("PDF report is being prepared or was not generated.")
 
                 with dl_col2:
                     csv_data = df_health_full[df_health_full["Lake_ID"].isin(st.session_state.selected_lake_ids)].to_csv(index=False).encode('utf-8')
                     st.download_button("📥 Download Filtered Data (CSV)", csv_data, f"data_{'_'.join(map(str, st.session_state.selected_lake_ids))}.csv", "text/csv", use_container_width=True)
-
         else: 
             st.info("ℹ️ Select parameters and lakes from the control panel, then click 'Analyze Selected Lakes'.")
