@@ -290,7 +290,6 @@ def generate_ai_insight(prompt):
     if not API_KEY: return "Error: API Key not found. Please configure it in Streamlit secrets."
     API_URL = "https://openrouter.ai/api/v1/chat/completions"
     headers = {"Authorization": f"Bearer {API_KEY}"}
-    # ## RESTORED MODEL: Changed back to DeepSeek as requested.
     data = {"model": "deepseek/deepseek-chat:free", "messages": [{"role": "user", "content": prompt}]}
     try:
         response = requests.post(API_URL, json=data, headers=headers, timeout=90)
@@ -400,34 +399,54 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
 st.set_page_config(layout="wide")
 st.title("🌊 Dynamic Lake Health Dashboard")
 
+# --- INITIALIZE APP ---
 df_health_full, df_location, ui_options = prepare_all_data(HEALTH_DATA_PATH, LOCATION_DATA_PATH)
 if df_health_full is None: st.stop()
 
-# Initialize session state
+# --- STATE MANAGEMENT ---
+# Initialize state only if keys are not already present
 if 'confirmed_parameters' not in st.session_state: st.session_state.confirmed_parameters = []
-if "selected_lake_ids" not in st.session_state: st.session_state.selected_lake_ids = sorted([])
+if "selected_lake_ids" not in st.session_state: st.session_state.selected_lake_ids = []
 if 'analysis_results' not in st.session_state: st.session_state.analysis_results = None
+if 'lake_id_input' not in st.session_state: st.session_state.lake_id_input = ", ".join(map(str, st.session_state.selected_lake_ids))
 
+# --- UI CALLBACKS (Robust state handling) ---
+def update_lake_ids_from_input():
+    """Parses the text input and updates the canonical list of lake IDs."""
+    try:
+        text_input = st.session_state.lake_id_input
+        new_ids = sorted([int(x.strip()) for x in text_input.split(",") if x.strip()]) if text_input else []
+        if new_ids != st.session_state.selected_lake_ids:
+            st.session_state.selected_lake_ids = new_ids
+            st.session_state.analysis_results = None # Reset results if IDs change
+    except (ValueError, TypeError):
+        st.warning("Invalid input detected. Please enter comma-separated numbers only.")
+
+def add_lake_id():
+    """Adds a lake from the dropdown to the list."""
+    selected_lake_id = st.session_state.lake_selector
+    if selected_lake_id not in st.session_state.selected_lake_ids:
+        st.session_state.selected_lake_ids.append(selected_lake_id)
+        st.session_state.selected_lake_ids.sort()
+        st.session_state.lake_id_input = ", ".join(map(str, st.session_state.selected_lake_ids))
+        st.session_state.analysis_results = None # Reset results
+
+def set_parameters():
+    """Updates the parameter list based on checkbox selections."""
+    st.session_state.confirmed_parameters = [p for p, selected in st.session_state.items() if p.startswith("param_") and selected]
+    # Clean up the key name for the list
+    st.session_state.confirmed_parameters = [p.replace("param_", "") for p in st.session_state.confirmed_parameters]
+    st.session_state.analysis_results = None # Reset results
+
+
+# --- SIDEBAR UI ---
 with st.sidebar:
     st.header("1. Select Parameters")
     st.markdown("Choose parameters for the health score:")
     
-    param_selections = {}
+    # Use keys that match the parameter names for easier processing in the callback
     for param in ui_options:
-        param_selections[param] = st.checkbox(
-            param, 
-            value=(param in st.session_state.confirmed_parameters), 
-            key=f"param_{param}"
-        )
-
-    if st.button("Set Parameters", use_container_width=True):
-        st.session_state.confirmed_parameters = [p for p, selected in param_selections.items() if selected]
-        st.session_state.analysis_results = None
-        st.rerun()
-    
-    if st.session_state.confirmed_parameters:
-        param_str = ", ".join(f"`{p}`" for p in st.session_state.confirmed_parameters)
-        st.info(f"**Active Parameters:** {param_str}")
+        st.checkbox(param, key=f"param_{param}", on_change=set_parameters)
 
     st.divider()
     st.header("2. Select Lakes")
@@ -439,16 +458,12 @@ with st.sidebar:
     lake_ids_in_district = sorted(filtered_lakes_by_loc['Lake_ID'].unique())
     
     if lake_ids_in_district:
-        selected_lake_id = st.selectbox("Select a Lake ID to Add", lake_ids_in_district)
-        if st.button("Add Lake for Comparison", use_container_width=True):
-            if selected_lake_id not in st.session_state.selected_lake_ids: 
-                st.session_state.selected_lake_ids.append(selected_lake_id)
-                st.session_state.selected_lake_ids.sort()
-            st.session_state.analysis_results = None
-            st.rerun()
+        st.selectbox("Select a Lake ID to Add", lake_ids_in_district, key="lake_selector")
+        st.button("Add Lake for Comparison", on_click=add_lake_id, use_container_width=True)
     else: 
         st.warning("No lakes found in this district.")
 
+# --- MAIN PAGE UI ---
 col1, col2 = st.columns(2)
 
 with col1:
@@ -463,17 +478,16 @@ with col1:
 
 with col2:
     st.subheader("🔬 Lakes Selected for Analysis")
-    ids_text = ", ".join(map(str, st.session_state.selected_lake_ids))
-    edited_ids_text = st.text_area("Edit Lake IDs (comma-separated)", ids_text, height=50, key="lake_id_editor")
+    st.text_area(
+        "Edit Lake IDs (comma-separated)", 
+        key="lake_id_input", 
+        on_change=update_lake_ids_from_input,
+        height=50
+    )
     
-    try:
-        current_ids_in_box = sorted([int(x.strip()) for x in edited_ids_text.split(",") if x.strip()]) if edited_ids_text else []
-        if current_ids_in_box != st.session_state.selected_lake_ids:
-            st.session_state.selected_lake_ids = current_ids_in_box
-            st.session_state.analysis_results = None
-            st.rerun()
-    except (ValueError, TypeError): 
-        st.warning("Invalid input. Please enter comma-separated numbers.")
+    if st.session_state.confirmed_parameters:
+        param_str = ", ".join(f"`{p}`" for p in st.session_state.confirmed_parameters)
+        st.info(f"**Active Parameters:** {param_str}")
 
     lake_ids_to_analyze = st.session_state.get("selected_lake_ids", [])
     is_disabled = not lake_ids_to_analyze or not st.session_state.confirmed_parameters
@@ -500,10 +514,21 @@ with col2:
         st.dataframe(st.session_state.analysis_results[["Lake_ID", "Health Score", "Rank"]].style.format({"Health Score": "{:.3f}"}), use_container_width=True)
         st.subheader("📥 Download Center")
 
-        if st.button("📄 Generate & Download Full PDF Report", use_container_width=True):
+        # The PDF generation is computationally expensive, so we only do it when the button is clicked.
+        if st.button("📄 Generate Full PDF Report", use_container_width=True):
              with st.spinner("Generating PDF Report... Please wait."):
-                pdf_buffer = generate_comparative_pdf_report(df_health_full[df_health_full["Lake_ID"].isin(lake_ids_to_analyze)], st.session_state.analysis_results, st.session_state.calc_details, lake_ids_to_analyze, st.session_state.confirmed_parameters)
-                st.download_button(label="✅ Click to Download PDF", data=pdf_buffer, file_name=f"Full_Report_{'_'.join(map(str, lake_ids_to_analyze))}.pdf", mime="application/pdf", use_container_width=True)
+                # We store the generated PDF in session state to allow the download button to access it.
+                st.session_state.pdf_buffer = generate_comparative_pdf_report(df_health_full[df_health_full["Lake_ID"].isin(lake_ids_to_analyze)], st.session_state.analysis_results, st.session_state.calc_details, lake_ids_to_analyze, st.session_state.confirmed_parameters)
+        
+        # If the PDF buffer exists in the session state, show the download button.
+        if 'pdf_buffer' in st.session_state and st.session_state.pdf_buffer is not None:
+            st.download_button(
+                label="✅ Click to Download PDF", 
+                data=st.session_state.pdf_buffer, 
+                file_name=f"Full_Report_{'_'.join(map(str, lake_ids_to_analyze))}.pdf", 
+                mime="application/pdf", 
+                use_container_width=True
+            )
 
         csv_data = df_health_full[df_health_full["Lake_ID"].isin(lake_ids_to_analyze)].to_csv(index=False).encode('utf-8')
         st.download_button("📥 Download Filtered Data (CSV)", csv_data, f"data_{'_'.join(map(str, lake_ids_to_analyze))}.csv", "text/csv", use_container_width=True)
