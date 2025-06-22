@@ -22,8 +22,6 @@ from reportlab.lib.utils import ImageReader
 from reportlab.lib import colors
 from reportlab.platypus import Paragraph, Table, TableStyle, PageBreak
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.platypus.doctemplate import BaseDocTemplate, PageTemplate, Frame
-from reportlab.platypus import Paragraph
 from matplotlib.ticker import MaxNLocator
 
 # --- CONFIGURATION ---
@@ -156,7 +154,7 @@ def calculate_historical_scores(_df_full, selected_ui_options):
     historical_df['Rank'] = historical_df.groupby('Year')['Health Score'].rank(ascending=False, method='min', na_option='bottom').fillna(0).astype(int)
     return historical_df
 
-# --- PLOTTING, AI, and PDF FUNCTIONS ---
+# --- PLOTTING & AI FUNCTIONS ---
 @st.cache_data
 def generate_grouped_plots_by_metric(_df, lake_ids, metrics):
     df = _df.copy()
@@ -220,95 +218,29 @@ def plot_radar_chart(calc_details):
     ax.set_title("Lake Health Fingerprint", size=20, y=1.1)
     ax.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1))
     buf = BytesIO(); plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.3); plt.close(fig)
-    return "Figure 1: Lake Health Fingerprint", buf, False
+    return buf
 
+# --- AI & PDF Section (Re-engineered for efficiency) ---
 @st.cache_data
-def plot_health_score_evolution(_df, confirmed_params):
-    historical_scores = calculate_historical_scores(_df, confirmed_params)
-    if historical_scores.empty: return None, None, None
-    lake_ids = sorted(historical_scores['Lake_ID'].unique())
-    n_lakes = len(lake_ids)
-    ncols = min(n_lakes, 3); nrows = (n_lakes - 1) // ncols + 1
-    fig, axes = plt.subplots(nrows, ncols, figsize=(4.5 * ncols, 3.5 * nrows), dpi=150, sharey=True)
-    axes = np.array(axes).flatten()
-    for i, lake_id in enumerate(lake_ids):
-        ax = axes[i]
-        lake_data = historical_scores[historical_scores['Lake_ID'] == lake_id]
-        ax.plot(lake_data['Year'], lake_data['Health Score'], marker='o', linestyle='-')
-        ax.set_title(f"Lake {lake_id}"); ax.grid(True, linestyle='--', alpha=0.6)
-        ax.xaxis.set_major_locator(MaxNLocator(integer=True, nbins=5))
-    fig.suptitle('Evolution of Overall Lake Health Score', fontsize=20, y=0.98)
-    fig.supxlabel('Year', fontsize=14); fig.supylabel('Health Score', fontsize=14, x=0.01)
-    for i in range(n_lakes, len(axes)): axes[i].set_visible(False)
-    fig.tight_layout(pad=2.0, h_pad=3.0, w_pad=2.0, rect=[0.03, 0.03, 1, 0.95]);
-    buf = BytesIO(); plt.savefig(buf, format='png'); plt.close(fig)
-    return "Figure 2: Evolution of Overall Health Score", buf, False
-
-@st.cache_data
-def plot_holistic_trajectory_matrix(_df, _results, confirmed_params):
-    historical_scores = calculate_historical_scores(_df, confirmed_params)
-    if historical_scores.empty: return None, None, None
-    trends = historical_scores.groupby('Lake_ID').apply(lambda x: linregress(x['Year'], x['Health Score']).slope if len(x['Year'].unique()) > 1 else 0)
-    plot_df = _results.set_index('Lake_ID').copy(); plot_df['Overall Trend'] = trends
-    fig, ax = plt.subplots(figsize=(10, 8), dpi=150)
-    sns.scatterplot(data=plot_df, x='Health Score', y='Overall Trend', hue=plot_df.index.astype(str), s=150, palette='viridis', legend=False, ax=ax)
-    for i, row in plot_df.iterrows(): ax.text(row['Health Score'] + 0.005, row['Overall Trend'], f"Lake {i}", fontsize=9)
-    avg_score = plot_df['Health Score'].mean()
-    ax.axhline(0, ls='--', color='gray'); ax.axvline(avg_score, ls='--', color='gray')
-    ax.set_title('Holistic Lake Trajectory Analysis', fontsize=16, pad=20)
-    ax.set_xlabel('Latest Health Score (Status)', fontsize=12); ax.set_ylabel('Overall Health Score Trend (Slope)', fontsize=12)
-    plt.text(avg_score + 0.01, ax.get_ylim()[1], 'Healthy & Resilient', ha='left', va='top', color='green', alpha=0.7)
-    plt.text(avg_score + 0.01, ax.get_ylim()[0], 'Healthy but Vulnerable', ha='left', va='bottom', color='orange', alpha=0.7)
-    plt.text(avg_score - 0.01, ax.get_ylim()[1], 'In Recovery', ha='right', va='top', color='blue', alpha=0.7)
-    plt.text(avg_score - 0.01, ax.get_ylim()[0], 'Critical Condition', ha='right', va='bottom', color='red', alpha=0.7)
-    plt.tight_layout(); buf = BytesIO(); plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.3); plt.close(fig)
-    return "Figure 3: Holistic Lake Trajectory", buf, False
-
-@st.cache_data
-def plot_hdi_vs_health_correlation(_results):
-    fig, ax = plt.subplots(figsize=(10, 7), dpi=150)
-    if 'HDI' not in _results.columns or _results['HDI'].isnull().all():
-        ax.text(0.5, 0.5, 'HDI data not available for this analysis.', ha='center', va='center')
-    else:
-        clean_results = _results.dropna(subset=['HDI', 'Health Score'])
-        sns.regplot(data=clean_results, x='HDI', y='Health Score', ax=ax, ci=95, scatter_kws={'s': 100})
-        for i, row in clean_results.iterrows(): ax.text(row['HDI'], row['Health Score'] + 0.01, f"Lake {row['Lake_ID']}", fontsize=9)
-        if len(clean_results) > 1:
-            slope, intercept, r_value, p_value, std_err = linregress(clean_results['HDI'], clean_results['Health Score'])
-            ax.text(0.05, 0.95, f'$R^2 = {r_value**2:.2f}$\np-value = {p_value:.3f}', transform=ax.transAxes, fontsize=12, verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-    ax.set_title('Socioeconomic Context: HDI vs. Lake Health', fontsize=16, pad=20)
-    ax.set_xlabel('Human Development Index (HDI)', fontsize=12); ax.set_ylabel('Final Health Score', fontsize=12)
-    plt.tight_layout(); buf = BytesIO(); plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.3); plt.close(fig)
-    return "Figure 4: HDI vs. Lake Health", buf, False
-
-@st.cache_data
-def build_detailed_ai_prompt(results, calc_details):
-    prompt = ("You are an expert environmental data analyst. Your goal is to provide qualitative insights, not just quantitative comparisons. "
-              "Generate a detailed comparative analysis of the following lakes based on their health parameters. For each parameter group (e.g., Climate, Water Quality), "
-              "identify the 'best-in-class' and 'most-at-risk' lakes. Explain the *implications* of these differences. Use numbers only to support your qualitative statements.\n\n"
-              "### Lake Data Profiles:\n")
+def generate_holistic_ai_analysis(results, calc_details):
+    # This single, powerful prompt replaces multiple smaller calls.
+    prompt = "You are an expert environmental data analyst creating a summary for a technical report. "
+    prompt += "Analyze the provided lake health data to generate a concise, insightful narrative. "
+    prompt += "The data includes final health scores, rankings, and the underlying factor scores for each parameter.\n\n"
+    prompt += "### Lake Health Data:\n"
     for _, row in results.iterrows():
         lake_id = row['Lake_ID']
         prompt += f"--- Lake {lake_id} ---\n"
-        prompt += f"Final Health Score: {row['Health Score']:.3f} (Rank: {row['Rank']})\n"
+        prompt += f"- Final Health Score: {row['Health Score']:.3f} (Rank: {row['Rank']})\n"
         for param, details in calc_details[lake_id].items():
-            prompt += f"- {param}: {details['Raw Value']:.2f} (Factor Score: {details['Factor Score']:.3f})\n"
-    prompt += "\n### Analysis Task:\n"
-    prompt += "1. **Overall Summary:** Briefly state which lakes are healthiest and which are of most concern overall.\n"
-    prompt += "2. **Parameter Group Analysis:** For each group (Climate, Water Quality, Land Cover, Socioeconomic), provide a paragraph comparing the lakes. Focus on insights, not just data. Example: 'In terms of Water Quality, Lake X stands out with excellent clarity, while Lake Y's high surface temperature is a significant concern for its ecosystem.'\n"
-    return prompt
-
-@st.cache_data
-def build_figure_specific_ai_prompt(figure_title, data_summary):
-    prompt = f"You are an environmental data analyst interpreting a figure for a report. The figure is titled '{figure_title}'. Below is a summary of the data used to create this figure.\n\n"
-    prompt += "### Data Summary:\n" + data_summary + "\n\n"
-    prompt += ("### Your Task:\nWrite a concise, insightful paragraph (3-5 sentences) that interprets this figure. "
-               "Explain what the visual pattern reveals about the lakes being compared. Do not just list the data; "
-               "provide a high-level interpretation of the findings shown in the chart.")
-    return prompt
-
-@st.cache_data
-def generate_ai_insight(prompt):
+            prompt += f"  - {param}: (Factor Score: {details['Factor Score']:.3f})\n"
+    
+    prompt += "\n### Your Task:\n"
+    prompt += "Based on the data, provide the following sections:\n"
+    prompt += "1.  **Overall Summary:** A brief paragraph identifying the healthiest and most at-risk lakes. Explain the primary drivers for their status based on the factor scores (e.g., 'Lake X is healthiest due to strong water quality scores, whereas Lake Y is at risk because of poor land cover metrics').\n"
+    prompt += "2.  **Key Findings:** A bulleted list of 3-4 of the most important comparative findings. Focus on contrasts. For example: 'Water Clarity: Lake A shows excellent clarity, while Lake B and C are significantly impaired, suggesting higher sediment or algal loads.' or 'Socioeconomic Factors: The high HDI for Lake Z appears to correlate with better overall health, unlike other lakes in the analysis.'\n"
+    prompt += "3.  **Recommendations:** A brief paragraph suggesting potential management actions. For example, 'Efforts for Lake Y should focus on watershed management to improve land cover, while Lake Z can serve as a model for successful conservation.'"
+    
     API_KEY = st.secrets.get("OPENROUTER_API_KEY")
     if not API_KEY: return "Error: API Key not found. Please configure it in Streamlit secrets."
     API_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -319,12 +251,11 @@ def generate_ai_insight(prompt):
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"]
     except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 402: return "AI Analysis Failed: 402 Payment Required. Please check your OpenRouter account balance or rate limits."
+        if e.response.status_code == 429: return "AI Analysis Failed: API rate limit exceeded. Please try again in a moment."
         return f"AI Analysis Failed: HTTP Error {e.response.status_code} - {e}"
     except requests.exceptions.RequestException as e: return f"AI Analysis Failed: Network error - {e}"
     except (KeyError, IndexError): return "AI Analysis Failed: Could not parse a valid response from the AI model."
 
-# --- PDF GENERATION WITH ENHANCEMENTS (Single-Pass Method) ---
 class NumberedCanvas(canvas.Canvas):
     def __init__(self, *args, **kwargs):
         canvas.Canvas.__init__(self, *args, **kwargs)
@@ -335,7 +266,6 @@ class NumberedCanvas(canvas.Canvas):
         self._startPage()
 
     def save(self):
-        """add page info to each page (page x of y)"""
         num_pages = len(self._saved_page_states)
         for state in self._saved_page_states:
             self.__dict__.update(state)
@@ -361,38 +291,13 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
         p.wrapOn(canvas_obj, width, height)
         p.drawOn(canvas_obj, x, y - p.height)
         return p.height
-        
-    # --- Page 1: Table of Contents ---
+    
+    # --- Simplified Single-Pass PDF Generation ---
     c.setTitle("Lake Health Report")
-    y_cursor = A4[1] - 50
-    # PDF IMPROVEMENT: Title changed and overlap fixed
-    y_cursor -= draw_paragraph(c, "Lake Health Report", title_style, 40, y_cursor, A4[0] - 80, 100)
-    y_cursor -= 30 # Space between title and TOC
-    y_cursor -= draw_paragraph(c, "Table of Contents", header_style, 40, y_cursor, A4[0] - 80, 50)
     
-    final_weights = get_effective_weights(selected_ui_options, df.columns)
-    params_to_plot = sorted([p for p in final_weights.keys() if p != 'HDI'])
-    
-    # Define bookmarks
-    bookmarks = [("Health Score Ranking", "ranking", 0)]
-    bookmarks.append(("AI-Powered Detailed Comparison", "ai_comparison", 0))
-    bookmarks.append(("Health Score Calculation Breakdown", "breakdown", 0))
-    bookmarks.append(("Parameter Trend Plots", "parameter_plots", 0))
-    for p in params_to_plot:
-        bookmarks.append((f"Trend for: {p}", f"plot_{p.replace(' ', '_')}", 1))
-    bookmarks.append(("Case Study Analysis", "case_study", 0))
-
-    for title, key, level in bookmarks:
-        c.addOutlineEntry(title, key, level=level, closed=False)
-        c.drawString(60 + (level*20), y_cursor, title)
-        c.linkRect("", key, (50, y_cursor - 5, 550, y_cursor + 15), relative=1, thickness=0)
-        y_cursor -= 20
-
-    c.showPage()
-    
-    # --- Page 2: Ranking ---
-    c.bookmarkPage('ranking')
-    y_cursor = A4[1] - 80
+    # --- Page 1: Title and Ranking ---
+    draw_paragraph(c, "Lake Health Report", title_style, 40, A4[1] - 50, A4[0] - 80, 100)
+    y_cursor = A4[1] - 120
     y_cursor -= draw_paragraph(c, "Health Score Ranking", header_style, 40, y_cursor, A4[0]-80, 50)
     y_cursor -= draw_paragraph(c, "Scores are calculated on a normalized scale from 0 (lowest health) to 1 (highest health).", subtitle_style, 40, y_cursor, A4[0]-80, 50)
     
@@ -413,14 +318,36 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
     c.setFillColor(colors.black); c.drawString(bar_start_x + 15, y_cursor, "Moderate (0.5 < Score <= 0.75)")
     y_cursor -= 15; c.setFillColor(colors.firebrick); c.rect(bar_start_x, y_cursor, 10, 10, fill=1)
     c.setFillColor(colors.black); c.drawString(bar_start_x + 15, y_cursor, "Poor (Score <= 0.5)")
+    c.showPage()
     
-    # --- Subsequent Pages ---
-    c.showPage(); c.bookmarkPage('ai_comparison')
-    ai_prompt = build_detailed_ai_prompt(results, calc_details); ai_narrative = generate_ai_insight(ai_prompt)
-    draw_paragraph(c, "AI-Powered Detailed Comparison", title_style, 40, A4[1] - 50, A4[0] - 80, 100)
+    # --- Page 2: Holistic AI Analysis ---
+    ai_narrative = generate_holistic_ai_analysis(results, calc_details)
+    draw_paragraph(c, "AI-Powered Analysis Summary", title_style, 40, A4[1] - 50, A4[0] - 80, 100)
     draw_paragraph(c, ai_narrative, justified_style, 40, A4[1] - 120, A4[0] - 80, A4[1] - 160)
-    
-    c.showPage(); c.bookmarkPage('breakdown')
+    c.showPage()
+
+    # --- Subsequent Pages: Visualizations and Data Tables ---
+    # Radar Chart
+    radar_buffer = plot_radar_chart(calc_details)
+    if radar_buffer:
+        draw_paragraph(c, "Lake Health Fingerprint", header_style, 40, A4[1] - 80, A4[0]-80, 50)
+        c.drawImage(ImageReader(radar_buffer), 40, A4[1] - 550, width=500, height=450, preserveAspectRatio=True)
+        c.showPage()
+
+    # Parameter Plots
+    final_weights = get_effective_weights(selected_ui_options, df.columns)
+    params_to_plot = sorted([p for p in final_weights.keys() if p != 'HDI'])
+    plots = generate_grouped_plots_by_metric(df, lake_ids, params_to_plot)
+    for i, (title, buf, _) in enumerate(plots):
+        if i > 0 and i % 2 == 0: c.showPage()
+        y_pos = A4[1] - 50 if i % 2 == 0 else A4[1] * 0.5 - 60
+        img_y_pos = A4[1] * 0.5 - 20 if i % 2 == 0 else 20
+        c.setFont("Helvetica-Bold", 14); c.drawCentredString(A4[0] / 2, y_pos, title)
+        c.drawImage(ImageReader(buf), 40, img_y_pos, width=A4[0] - 80, height=A4[1] * 0.45 - 40, preserveAspectRatio=True)
+        if i % 2 == 0 and i + 1 < len(plots): c.line(40, A4[1]*0.5 - 40, A4[0] - 40, A4[1]*0.5 - 40)
+    c.showPage()
+
+    # Data Breakdown Tables
     y_cursor = A4[1] - 50
     y_cursor -= draw_paragraph(c, "Health Score Calculation Breakdown", title_style, 40, y_cursor, A4[0]-80, 100)
     for lake_id in lake_ids:
@@ -434,34 +361,7 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
         if y_cursor < table_height + 40: c.showPage(); y_cursor = A4[1] - 80
         y_cursor -= draw_paragraph(c, f"Breakdown for Lake {lake_id}", header_style, 40, y_cursor, 200, 40)
         table.drawOn(c, 40, y_cursor - table_height); y_cursor -= (table_height + 20)
-
-    c.showPage(); c.bookmarkPage("parameter_plots")
-    plots = generate_grouped_plots_by_metric(df, lake_ids, params_to_plot)
-    for i, (title, buf, _) in enumerate(plots):
-        if i > 0 and i % 2 == 0: c.showPage()
-        y_pos = A4[1] - 50 if i % 2 == 0 else A4[1] * 0.5 - 60
-        img_y_pos = A4[1] * 0.5 - 20 if i % 2 == 0 else 20
-        c.bookmarkPage(f"plot_{title.replace('Trend for: ', '').replace(' ', '_')}")
-        c.setFont("Helvetica-Bold", 14); c.drawCentredString(A4[0] / 2, y_pos, title)
-        c.drawImage(ImageReader(buf), 40, img_y_pos, width=A4[0] - 80, height=A4[1] * 0.45 - 40, preserveAspectRatio=True)
-        if i % 2 == 0 and i + 1 < len(plots): c.line(40, A4[1]*0.5 - 40, A4[0] - 40, A4[1]*0.5 - 40)
-
-    c.showPage(); c.bookmarkPage('case_study')
-    y_cursor = A4[1] - 50
-    y_cursor -= draw_paragraph(c, "Case Study Analysis", title_style, 40, y_cursor, A4[0]-80, 100)
-    case_study_figures = [plot_radar_chart(calc_details), plot_health_score_evolution(df, selected_ui_options), plot_holistic_trajectory_matrix(df, results, selected_ui_options), plot_hdi_vs_health_correlation(results)]
-    for i, fig_data in enumerate(case_study_figures):
-        if fig_data is None or fig_data[1] is None: continue
-        if i > 0 : c.showPage()
-        title, buf, _ = fig_data
-        data_summary = f"Analysis of lakes {lake_ids} with parameters {selected_ui_options}."
-        ai_prompt = build_figure_specific_ai_prompt(title, data_summary); ai_narrative = generate_ai_insight(ai_prompt)
-        y_cursor = A4[1] - 80
-        y_cursor -= draw_paragraph(c, title, header_style, 40, y_cursor, A4[0]-80, 100)
-        c.drawImage(ImageReader(buf), 40, y_cursor - (A4[1] * 0.5), width=A4[0]-80, height=A4[1] * 0.5, preserveAspectRatio=True)
-        y_cursor -= (A4[1] * 0.5 + 20)
-        draw_paragraph(c, ai_narrative, justified_style, 40, y_cursor, A4[0]-80, A4[1]*0.4 - 40)
-
+    
     c.save()
     buffer.seek(0)
     return buffer
