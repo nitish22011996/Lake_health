@@ -9,3 +9,4 @@ httpx
 scipy
 folium
 streamlit-folium
+PyPDF2
