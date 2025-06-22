@@ -24,6 +24,12 @@ from reportlab.platypus import Paragraph, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from matplotlib.ticker import MaxNLocator
 
+# --- PDF IMPROVEMENT: This library is now required for the Table of Contents ---
+# --- Please install it: pip install PyPDF2 ---
+# --- Or add 'PyPDF2' to your requirements.txt file ---
+from PyPDF2 import PdfWriter, PdfReader
+
+
 # --- CONFIGURATION ---
 LOCATION_DATA_PATH = 'HDI_lake_district.csv'
 HEALTH_DATA_PATH = "lake_health_data.csv"
@@ -346,64 +352,83 @@ class PDFReport:
         return p.height
 
     def add_toc_entry(self, title, level=0):
-        self.toc.append((title, self.canvas.getPageNumber(), level))
-    
-    def draw_page_number(self):
-        page_num_text = f"Page {self.canvas.getPageNumber()}"
-        self.canvas.setFont("Helvetica", 9)
-        self.canvas.drawRightString(self.width - 20, 20, page_num_text)
+        # We add the page number when drawing the TOC, not when collecting entries
+        self.toc.append({'title': title, 'level': level, 'page_num': self.canvas.getPageNumber()})
 
-    def show_page_and_add_number(self):
-        self.draw_page_number()
+    def draw_page_number(self, page_num, total_pages):
+        self.canvas.setFont("Helvetica", 9)
+        self.canvas.drawRightString(self.width - 20, 20, f"Page {page_num} of {total_pages}")
+
+    def show_page(self):
         self.canvas.showPage()
 
     def build(self, df, results, calc_details, lake_ids, selected_ui_options):
-        # --- PASS 1: Generate content and store page numbers ---
+        # Generate content pages and collect TOC entries
         self.generate_content_pages(df, results, calc_details, lake_ids, selected_ui_options)
         
-        # --- PASS 2: Generate the final PDF with TOC ---
+        # Save the content to a buffer
+        self.canvas.save()
+        content_buffer = self.buffer
+        content_buffer.seek(0)
+        
+        # --- PASS 2: Create the final PDF with TOC and page numbers ---
         final_buffer = BytesIO()
         final_canvas = canvas.Canvas(final_buffer, pagesize=A4)
         
-        # Draw TOC on page 1
+        # Draw TOC on page 1 of the final PDF
         self.draw_toc_page(final_canvas)
         final_canvas.showPage()
         
-        # Draw the rest of the pages
-        self.buffer.seek(0)
-        from PyPDF2 import PdfWriter, PdfReader
-        content_pdf = PdfReader(self.buffer)
+        # Merge content pages into the final PDF
         output_pdf = PdfWriter()
         
-        # Add TOC page
-        toc_page = PdfReader(BytesIO(final_canvas.getpdfdata())).pages[0]
-        output_pdf.add_page(toc_page)
-        
-        # Add content pages
-        for i, page in enumerate(content_pdf.pages):
-            page.merge_page(PdfReader(BytesIO(self.create_page_number_overlay(i + 2, len(content_pdf.pages) + 1))).pages[0])
+        # Add the TOC page we just created
+        toc_pdf = PdfReader(BytesIO(final_canvas.getpdfdata()))
+        output_pdf.add_page(toc_pdf.pages[0])
+
+        # Add the content pages from the first pass
+        content_pdf = PdfReader(content_buffer)
+        for page in content_pdf.pages:
             output_pdf.add_page(page)
 
+        # Write the merged PDF to the final buffer
         output_pdf.write(final_buffer)
-        return final_buffer
+        
+        # --- PASS 3: Add page numbers to the final merged PDF ---
+        final_pdf_with_numbers_buffer = BytesIO()
+        pdf_reader = PdfReader(final_buffer)
+        pdf_writer = PdfWriter()
+        total_pages = len(pdf_reader.pages)
 
-    def create_page_number_overlay(self, page_num, total_pages):
-        overlay_buffer = BytesIO()
-        c = canvas.Canvas(overlay_buffer, pagesize=A4)
-        c.setFont("Helvetica", 9)
-        c.drawRightString(self.width - 20, 20, f"Page {page_num} of {total_pages}")
-        c.save()
-        overlay_buffer.seek(0)
-        return overlay_buffer
+        for page_num, page in enumerate(pdf_reader.pages, 1):
+            overlay_buffer = BytesIO()
+            overlay_canvas = canvas.Canvas(overlay_buffer, pagesize=A4)
+            overlay_canvas.setFont("Helvetica", 9)
+            overlay_canvas.drawRightString(self.width - 20, 20, f"Page {page_num} of {total_pages}")
+            overlay_canvas.save()
+            overlay_buffer.seek(0)
+            
+            overlay_pdf = PdfReader(overlay_buffer)
+            page.merge_page(overlay_pdf.pages[0])
+            pdf_writer.add_page(page)
+
+        pdf_writer.write(final_pdf_with_numbers_buffer)
+        
+        return final_pdf_with_numbers_buffer
+
 
     def draw_toc_page(self, c):
-        # Draw the title
+        # PDF IMPROVEMENT: Title changed
         self.draw_paragraph_on_canvas(c, "Lake Health Report", self.title_style, 40, self.height - 50, self.width - 80, 100)
         
         y_cursor = self.height - 150
         y_cursor -= self.draw_paragraph_on_canvas(c, "Table of Contents", self.header_style, 40, y_cursor, 400, 50)
         
-        for title, page_num, level in self.toc:
+        for entry in self.toc:
+            title = entry['title']
+            page_num = entry['page_num']
+            level = entry['level']
+            
             if y_cursor < 100:
                 y_cursor = self.height - 80
             
@@ -418,14 +443,9 @@ class PDFReport:
             c.line(dot_x, y_cursor + 4, page_x - 5, y_cursor + 4)
             c.setDash([])
             
-            # Create clickable link area
-            c.linkURL(f'#page={page_num}', (x_offset, y_cursor - 2, self.width - 60, y_cursor + 12), relative=1)
+            # The links in TOC are tricky with PyPDF2 merge, this is a visual guide.
             y_cursor -= 20
         
-        # Draw page number on TOC page
-        c.setFont("Helvetica", 9)
-        c.drawRightString(self.width - 20, 20, f"Page 1 of {len(self.toc) + 1}")
-
     def draw_paragraph_on_canvas(self, c, text, style, x, y, width, height):
         p = Paragraph(str(text).replace('\n', '<br/>'), style)
         p.wrapOn(c, width, height)
@@ -433,7 +453,6 @@ class PDFReport:
         return p.height
 
     def generate_content_pages(self, df, results, calc_details, lake_ids, selected_ui_options):
-        # Page 1: Ranking
         self.add_toc_entry("Health Score Ranking")
         y_cursor = self.height - 80
         y_cursor -= self.draw_paragraph("Health Score Ranking", self.header_style, 40, y_cursor, self.width-80, 50)
@@ -441,7 +460,7 @@ class PDFReport:
         
         bar_start_x = 60; bar_height = 18; max_bar_width = self.width - bar_start_x - 150
         for _, row in results.iterrows():
-            if y_cursor < 150: self.show_page_and_add_number(); y_cursor = self.height - 80
+            if y_cursor < 150: self.show_page(); y_cursor = self.height - 80
             score = row['Health Score']; rank = int(row['Rank'])
             color = colors.darkgreen if score > 0.75 else colors.orange if score > 0.5 else colors.firebrick
             self.canvas.setFillColor(color)
@@ -459,16 +478,14 @@ class PDFReport:
         y_cursor -= 15; self.canvas.setFillColor(colors.firebrick); self.canvas.rect(bar_start_x, y_cursor, 10, 10, fill=1)
         self.canvas.setFillColor(colors.black); self.canvas.drawString(bar_start_x + 15, y_cursor, "Poor (Score <= 0.5)")
         
-        self.show_page_and_add_number()
+        self.show_page()
 
-        # Page 2: AI Comparison
         self.add_toc_entry("AI-Powered Detailed Comparison")
         ai_prompt = build_detailed_ai_prompt(results, calc_details); ai_narrative = generate_ai_insight(ai_prompt)
         self.draw_paragraph("AI-Powered Detailed Comparison", self.title_style, 40, self.height - 50, self.width - 80, 100)
         self.draw_paragraph(ai_narrative, self.justified_style, 40, self.height - 120, self.width - 80, self.height - 160)
-        self.show_page_and_add_number()
-
-        # Page 3: Breakdown
+        self.show_page()
+        
         self.add_toc_entry("Health Score Calculation Breakdown")
         y_cursor = self.height - 50
         y_cursor -= self.draw_paragraph("Health Score Calculation Breakdown", self.title_style, 40, y_cursor, self.width - 80, 100)
@@ -480,31 +497,29 @@ class PDFReport:
             table = Table(table_data, colWidths=[110, 60, 60, 60, 60, 60, 50, 60])
             table.setStyle(TableStyle([('BACKGROUND', (0,0), (-1,0), colors.darkslategray), ('TEXTCOLOR',(0,0),(-1,0),colors.whitesmoke), ('ALIGN', (0,0), (-1,-1), 'CENTER'), ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'), ('FONTSIZE', (0,0), (-1,-1), 7), ('BOTTOMPADDING', (0,0), (-1,0), 10), ('BACKGROUND', (0,1), (-1,-1), colors.antiquewhite), ('GRID', (0,0), (-1,-1), 1, colors.black)]))
             table_height = table.wrap(self.width-80, self.height)[1]
-            if y_cursor < table_height + 40: self.show_page_and_add_number(); y_cursor = self.height - 80
+            if y_cursor < table_height + 40: self.show_page(); y_cursor = self.height - 80
             y_cursor -= self.draw_paragraph(f"Breakdown for Lake {lake_id}", self.header_style, 40, y_cursor, 200, 40)
             table.drawOn(self.canvas, 40, y_cursor - table_height); y_cursor -= (table_height + 20)
-        self.show_page_and_add_number()
+        self.show_page()
 
-        # Parameter Plots
         final_weights = get_effective_weights(selected_ui_options, df.columns)
         params_to_plot = sorted([p for p in final_weights.keys() if p != 'HDI'])
         plots = generate_grouped_plots_by_metric(df, lake_ids, params_to_plot)
         self.add_toc_entry("Parameter Trend Plots", level=1)
         for i, (title, buf, _) in enumerate(plots):
-            if i % 2 == 0: self.show_page_and_add_number()
+            if i % 2 == 0: self.show_page()
             y_pos = self.height - 50 if i % 2 == 0 else self.height * 0.5 - 60
             img_y_pos = self.height * 0.5 - 20 if i % 2 == 0 else 20
             self.canvas.setFont("Helvetica-Bold", 14); self.canvas.drawCentredString(self.width / 2, y_pos, title)
             self.canvas.drawImage(ImageReader(buf), 40, img_y_pos, width=self.width - 80, height=self.height * 0.45 - 40, preserveAspectRatio=True)
             if i % 2 == 0 and i + 1 < len(plots): self.canvas.line(40, self.height*0.5 - 40, self.width - 40, self.height*0.5 - 40)
-        self.show_page_and_add_number()
+        self.show_page()
 
-        # Case Study
-        self.add_toc_entry("Case Study Analysis", level=0)
+        self.add_toc_entry("Case Study Analysis")
         case_study_figures = [plot_radar_chart(calc_details), plot_health_score_evolution(df, selected_ui_options), plot_holistic_trajectory_matrix(df, results, selected_ui_options), plot_hdi_vs_health_correlation(results)]
         for i, fig_data in enumerate(case_study_figures):
             if fig_data is None or fig_data[1] is None: continue
-            self.show_page_and_add_number()
+            self.show_page()
             title, buf, _ = fig_data
             data_summary = f"Analysis of lakes {lake_ids} with parameters {selected_ui_options}."
             ai_prompt = build_figure_specific_ai_prompt(title, data_summary); ai_narrative = generate_ai_insight(ai_prompt)
@@ -513,7 +528,6 @@ class PDFReport:
             self.canvas.drawImage(ImageReader(buf), 40, y_cursor - (self.height * 0.5), width=self.width-80, height=self.height * 0.5, preserveAspectRatio=True)
             y_cursor -= (self.height * 0.5 + 20)
             self.draw_paragraph(ai_narrative, self.justified_style, 40, y_cursor, self.width-80, self.height*0.4 - 40)
-        self.show_page_and_add_number()
 
 
 # --- STREAMLIT APP LAYOUT (SINGLE PAGE DASHBOARD) ---
@@ -593,7 +607,6 @@ with col2:
                     else:
                         results, calc_details = calculate_lake_health_score(selected_df, st.session_state.confirmed_parameters)
                         
-                        # Use the new PDF class
                         report = PDFReport(BytesIO())
                         pdf_buffer = report.build(selected_df, results, calc_details, lake_ids_to_analyze, st.session_state.confirmed_parameters)
                         
