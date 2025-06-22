@@ -156,20 +156,104 @@ def calculate_lake_health_score(_df, selected_ui_options, lake_ids_tuple):
 @st.cache_data
 def calculate_historical_scores(_df_full, selected_ui_options, lake_ids_tuple):
     df_full = _df_full.copy()
-    if df_full.empty: return pd.DataFrame()
+    if df_full.empty or not selected_ui_options:
+        return pd.DataFrame()
+
+    final_weights = get_effective_weights(selected_ui_options, df_full.columns)
+    params_to_process = list(final_weights.keys())
+
+    # --- START OF FIX: Pre-calculate GLOBAL normalization boundaries ---
+    bounds = {}
+    df_imputed_full = df_full.copy()
+    for param in params_to_process:
+        if param in df_imputed_full.columns:
+            # Impute missing values on the entire dataset first
+            df_imputed_full = df_imputed_full.sort_values(by=['Lake_ID', 'Year'])
+            df_imputed_full[param] = df_imputed_full.groupby('Lake_ID')[param].transform(lambda x: x.bfill().ffill())
+            df_imputed_full[param] = df_imputed_full[param].fillna(df_imputed_full[param].median())
+
+            # Get global min/max for the raw parameter values
+            value_min = df_imputed_full[param].min()
+            value_max = df_imputed_full[param].max()
+
+            slope_min, slope_max = 0, 0
+            if param != 'HDI':
+                 # Calculate all possible final slopes to find the global min/max slope
+                all_slopes = df_imputed_full.groupby('Lake_ID').apply(
+                    lambda x: linregress(x['Year'], x[param]).slope if len(x['Year'].unique()) > 1 else 0
+                )
+                slope_min = all_slopes.min()
+                slope_max = all_slopes.max()
+
+            bounds[param] = {
+                'value_min': value_min, 'value_max': value_max,
+                'slope_min': slope_min, 'slope_max': slope_max
+            }
+    # --- END OF FIX ---
+
+    def norm(val, v_min, v_max):
+        if v_max == v_min: return 0.5
+        return (val - v_min) / (v_max - v_min)
+
     all_historical_data = []
     years = sorted(df_full['Year'].unique())
+
     for year in years:
-        df_subset = df_full[df_full['Year'] <= year]
-        if not df_subset.empty:
-            current_lakes_tuple = tuple(sorted(df_subset['Lake_ID'].unique()))
-            results, _ = calculate_lake_health_score(df_subset, selected_ui_options, current_lakes_tuple)
-            if not results.empty:
-                results['Year'] = year
-                all_historical_data.append(results[['Year', 'Lake_ID', 'Health Score', 'Rank']])
-    if not all_historical_data: return pd.DataFrame()
+        df_subset = df_imputed_full[df_imputed_full['Year'] <= year].copy()
+        if df_subset.empty: continue
+
+        # Get the data for the specific 'year' we are calculating for
+        current_year_data = df_subset.loc[df_subset.groupby('Lake_ID')['Year'].idxmax()].set_index('Lake_ID')
+        total_score_for_year = pd.Series(0.0, index=current_year_data.index)
+
+        for param in params_to_process:
+            if param not in current_year_data.columns: continue
+
+            props = PARAMETER_PROPERTIES[param]
+            b = bounds[param]
+
+            # 1. Calculate Present Value Score using GLOBAL bounds
+            raw_values = current_year_data[param]
+            pv_score = norm(raw_values, b['value_min'], b['value_max'])
+            if props['impact'] == 'negative':
+                pv_score = 1.0 - pv_score
+
+            # 2. Calculate Trend Score using GLOBAL bounds
+            if param == 'HDI':
+                factor_score = pv_score
+            else:
+                # Calculate trend based on data *up to the current year*
+                trends = df_subset.groupby('Lake_ID').apply(
+                    lambda x: linregress(x['Year'], x[param]) if len(x['Year'].unique()) > 1 else (0,0,0,1,0)
+                )
+                slopes = trends.apply(lambda x: x.slope if not isinstance(x, tuple) else x[0])
+                p_values = trends.apply(lambda x: x.pvalue if not isinstance(x, tuple) else x[3])
+
+                slope_score = norm(slopes, b['slope_min'], b['slope_max'])
+                if props['impact'] == 'negative':
+                    slope_score = 1.0 - slope_score
+                
+                # P-value normalization is relative to the current data slice, which is acceptable
+                p_value_score = 1.0 - ( (p_values - p_values.min()) / (p_values.max() - p_values.min()) if p_values.max() != p_values.min() else 0.5)
+
+                factor_score = (pv_score + slope_score.fillna(0.5) + p_value_score.fillna(0.5)) / 3.0
+
+            total_score_for_year += final_weights[param] * factor_score
+
+        # Store results for this year
+        year_results = pd.DataFrame({
+            'Year': year,
+            'Lake_ID': total_score_for_year.index,
+            'Health Score': total_score_for_year.values
+        })
+        all_historical_data.append(year_results)
+
+    if not all_historical_data:
+        return pd.DataFrame()
+
     historical_df = pd.concat(all_historical_data).reset_index(drop=True)
-    historical_df['Rank'] = historical_df.groupby('Year')['Health Score'].rank(ascending=False, method='min', na_option='bottom').fillna(0).astype(int)
+    # Calculate rank within each year
+    historical_df['Rank'] = historical_df.groupby('Year')['Health Score'].rank(ascending=False, method='min').astype(int)
     return historical_df
 
 # --- PLOTTING, AI, and PDF FUNCTIONS ---
