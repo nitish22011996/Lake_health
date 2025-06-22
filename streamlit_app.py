@@ -403,99 +403,55 @@ if df_health_full is None: st.stop()
 # --- STATE MANAGEMENT ---
 if 'confirmed_parameters' not in st.session_state:
     st.session_state.confirmed_parameters = []
-if 'lake_id_text' not in st.session_state:
-    st.session_state.lake_id_text = ""
+if 'selected_lake_ids' not in st.session_state:
+    st.session_state.selected_lake_ids = []
 if 'analysis_results' not in st.session_state:
     st.session_state.analysis_results = None
 
-# --- NEW 3-COLUMN LAYOUT ---
-col1, col2, col3 = st.columns([1, 2, 2])
+# --- NEW 2-COLUMN LAYOUT (CONTROLS | MAIN CONTENT) ---
+col_controls, col_main = st.columns([1, 3])
 
-# --- COLUMN 1: CONTROLS (NO SIDEBAR) ---
-with col1:
-    st.header("Controls")
-    st.markdown("---")
-
-    # --- Parameter Selection ---
-    st.subheader("1. Select Parameters")
-    temp_selections = {}
-    for param in ui_options:
-        temp_selections[param] = st.checkbox(
-            param, 
-            value=(param in st.session_state.confirmed_parameters)
+# --- COLUMN 1: CONTROLS (Static and Always Visible) ---
+with col_controls:
+    with st.container(border=True):
+        st.subheader("1. Select Parameters")
+        # Using st.multiselect for a stable, clean selection experience.
+        # This acts like a checklist and is the standard, robust way to handle this.
+        confirmed_parameters = st.multiselect(
+            "Select parameters for analysis:",
+            options=ui_options,
+            default=st.session_state.confirmed_parameters,
+            key="parameter_selector"
         )
+        st.session_state.confirmed_parameters = confirmed_parameters
 
-    if st.button("Set Parameters", use_container_width=True):
-        st.session_state.confirmed_parameters = [p for p, selected in temp_selections.items() if selected]
-        st.session_state.analysis_results = None  # Reset results on change
+    with st.container(border=True):
+        st.subheader("2. Select Lakes")
+        sorted_states = sorted(df_location['State'].unique())
+        selected_state = st.selectbox("Filter by State:", sorted_states, key="state_selector")
+        
+        filtered_districts = df_location[df_location['State'] == selected_state]['District'].unique()
+        selected_district = st.selectbox("Filter by District:", sorted(filtered_districts), key="district_selector")
+        
+        # All lakes from the filtered district are available for selection
+        available_lakes = df_location[(df_location['State'] == selected_state) & (df_location['District'] == selected_district)]['Lake_ID'].unique()
+        
+        # The multiselect widget is the single source of truth for selected lakes
+        selected_lake_ids = st.multiselect(
+            "Select lakes for analysis:",
+            options=sorted(available_lakes),
+            default=st.session_state.selected_lake_ids,
+            key="lake_selector"
+        )
+        st.session_state.selected_lake_ids = selected_lake_ids
 
-    st.markdown("---")
-    
-    # --- Lake Selection ---
-    st.subheader("2. Select Lakes")
-    sorted_states = sorted(df_location['State'].unique())
-    selected_state = st.selectbox("Select State", sorted_states, key="state_selector")
-    
-    filtered_districts = df_location[df_location['State'] == selected_state]['District'].unique()
-    selected_district = st.selectbox("Select District", sorted(filtered_districts), key="district_selector")
-    
-    filtered_lakes_by_loc = df_location[(df_location['State'] == selected_state) & (df_location['District'] == selected_district)]
-    lake_ids_in_district = sorted(filtered_lakes_by_loc['Lake_ID'].unique())
-    
-    if lake_ids_in_district:
-        lake_to_add = st.selectbox("Select a Lake ID to Add", lake_ids_in_district, key="lake_add_selector")
-        if st.button("Add Lake for Comparison", use_container_width=True):
-            try:
-                # Read current IDs from the text box state
-                current_ids = {int(x.strip()) for x in st.session_state.lake_id_text.split(",") if x.strip()}
-                current_ids.add(lake_to_add)
-                # Update the text box state
-                st.session_state.lake_id_text = ", ".join(map(str, sorted(list(current_ids))))
-                st.session_state.analysis_results = None
-            except Exception:
-                pass # Ignore parsing errors if box is malformed
-    else: 
-        st.warning("No lakes found in this district.")
-
-# --- COLUMN 2: MAP ---
-with col2:
-    st.subheader(f"📍 Map of Lakes in {selected_district}, {selected_state}")
-    if not filtered_lakes_by_loc.empty:
-        map_center = [filtered_lakes_by_loc['Lat'].mean(), filtered_lakes_by_loc['Lon'].mean()]
-        m = folium.Map(location=map_center, zoom_start=8)
-        marker_cluster = MarkerCluster().add_to(m)
-        for _, row in filtered_lakes_by_loc.iterrows():
-            folium.Marker([row['Lat'], row['Lon']], popup=f"<b>Lake ID:</b> {row['Lake_ID']}", tooltip=f"Lake ID: {row['Lake_ID']}", icon=folium.Icon(color='blue', icon='water')).add_to(marker_cluster)
-        st_folium(m, height=500, use_container_width=True)
-
-# --- COLUMN 3: ANALYSIS & RESULTS ---
-with col3:
-    st.subheader("🔬 Lakes Selected for Analysis")
-
-    # The text area's state is the single source of truth
-    st.text_area(
-        "Selected Lake IDs (add from controls or edit here)",
-        key="lake_id_text",
-        height=50
-    )
-    
-    # Parse the text area to get the list of lakes to analyze
-    try:
-        lake_ids_to_analyze = sorted([int(x.strip()) for x in st.session_state.lake_id_text.split(",") if x.strip()])
-    except (ValueError, TypeError):
-        st.error("Invalid input in Lake IDs box. Please use comma-separated numbers.")
-        lake_ids_to_analyze = []
-
-    if st.session_state.confirmed_parameters:
-        param_str = ", ".join(f"`{p}`" for p in st.session_state.confirmed_parameters)
-        st.info(f"**Active Parameters:** {param_str}")
-
-    is_disabled = not lake_ids_to_analyze or not st.session_state.confirmed_parameters
-    
+    # --- ANALYSIS BUTTON ---
+    is_disabled = not st.session_state.selected_lake_ids or not st.session_state.confirmed_parameters
     if st.button("🚀 Analyze Selected Lakes", disabled=is_disabled, use_container_width=True, type="primary"):
         st.session_state.analysis_results = None
         with st.spinner("Analyzing... This may take a moment."):
             try:
+                lake_ids_to_analyze = st.session_state.selected_lake_ids
                 selected_df = df_health_full[df_health_full["Lake_ID"].isin(lake_ids_to_analyze)].copy()
                 if selected_df.empty:
                     st.error(f"No health data found for the selected Lake IDs: {lake_ids_to_analyze}")
@@ -507,30 +463,60 @@ with col3:
             except Exception as e: 
                 st.error(f"A critical error occurred during analysis.")
                 st.exception(e)
-    
-    st.divider()
 
-    # This section will now render correctly because the app doesn't crash
-    if st.session_state.analysis_results is not None and not st.session_state.analysis_results.empty:
-        st.subheader("📊 Health Score Results")
-        st.dataframe(st.session_state.analysis_results[["Lake_ID", "Health Score", "Rank"]].style.format({"Health Score": "{:.3f}"}), use_container_width=True)
-        st.subheader("📥 Download Center")
+# --- COLUMN 2: MAIN CONTENT (MAP & RESULTS) ---
+with col_main:
+    tab_map, tab_results = st.tabs(["📍 Map View", "📊 Analysis & Downloads"])
 
-        if st.button("📄 Generate Full PDF Report", use_container_width=True):
-             with st.spinner("Generating PDF Report... Please wait."):
-                pdf_buffer = generate_comparative_pdf_report(df_health_full[df_health_full["Lake_ID"].isin(lake_ids_to_analyze)], st.session_state.analysis_results, st.session_state.calc_details, lake_ids_to_analyze, st.session_state.confirmed_parameters)
-                st.session_state.pdf_buffer = pdf_buffer
-        
-        if 'pdf_buffer' in st.session_state and st.session_state.pdf_buffer is not None:
-            st.download_button(
-                label="✅ Click to Download PDF", 
-                data=st.session_state.pdf_buffer, 
-                file_name=f"Full_Report_{'_'.join(map(str, lake_ids_to_analyze))}.pdf", 
-                mime="application/pdf", 
-                use_container_width=True
-            )
+    with tab_map:
+        st.subheader(f"Map of Lakes in {selected_district}, {selected_state}")
+        filtered_lakes_by_loc = df_location[(df_location['State'] == selected_state) & (df_location['District'] == selected_district)]
+        if not filtered_lakes_by_loc.empty:
+            map_center = [filtered_lakes_by_loc['Lat'].mean(), filtered_lakes_by_loc['Lon'].mean()]
+            m = folium.Map(location=map_center, zoom_start=8)
+            marker_cluster = MarkerCluster().add_to(m)
+            for _, row in filtered_lakes_by_loc.iterrows():
+                # Highlight selected lakes
+                is_selected = row['Lake_ID'] in st.session_state.selected_lake_ids
+                folium.Marker(
+                    [row['Lat'], row['Lon']],
+                    popup=f"<b>Lake ID:</b> {row['Lake_ID']}",
+                    tooltip=f"Lake ID: {row['Lake_ID']}",
+                    icon=folium.Icon(color='green' if is_selected else 'blue', icon='water')
+                ).add_to(marker_cluster)
+            st_folium(m, height=600, use_container_width=True)
 
-        csv_data = df_health_full[df_health_full["Lake_ID"].isin(lake_ids_to_analyze)].to_csv(index=False).encode('utf-8')
-        st.download_button("📥 Download Filtered Data (CSV)", csv_data, f"data_{'_'.join(map(str, lake_ids_to_analyze))}.csv", "text/csv", use_container_width=True)
-    else: 
-        st.info("ℹ️ Set parameters and add at least one lake, then click 'Analyze'.")
+    with tab_results:
+        # This section will now render correctly
+        if st.session_state.analysis_results is not None and not st.session_state.analysis_results.empty:
+            with st.container(border=True):
+                st.subheader("Health Score Results")
+                st.dataframe(st.session_state.analysis_results[["Lake_ID", "Health Score", "Rank"]].style.format({"Health Score": "{:.3f}"}), use_container_width=True)
+            
+            with st.container(border=True):
+                st.subheader("Download Center")
+                # Use two columns for download buttons
+                dl_col1, dl_col2 = st.columns(2)
+                
+                with dl_col1:
+                    # PDF generation is computationally expensive, so we do it on demand
+                    if st.button("📄 Generate Full PDF Report", use_container_width=True):
+                         with st.spinner("Generating PDF Report... Please wait."):
+                            pdf_buffer = generate_comparative_pdf_report(df_health_full[df_health_full["Lake_ID"].isin(st.session_state.selected_lake_ids)], st.session_state.analysis_results, st.session_state.calc_details, st.session_state.selected_lake_ids, st.session_state.confirmed_parameters)
+                            st.session_state.pdf_buffer = pdf_buffer
+                    
+                    if 'pdf_buffer' in st.session_state and st.session_state.pdf_buffer is not None:
+                        st.download_button(
+                            label="✅ Click to Download PDF", 
+                            data=st.session_state.pdf_buffer, 
+                            file_name=f"Full_Report_{'_'.join(map(str, st.session_state.selected_lake_ids))}.pdf", 
+                            mime="application/pdf", 
+                            use_container_width=True
+                        )
+
+                with dl_col2:
+                    csv_data = df_health_full[df_health_full["Lake_ID"].isin(st.session_state.selected_lake_ids)].to_csv(index=False).encode('utf-8')
+                    st.download_button("📥 Download Filtered Data (CSV)", csv_data, f"data_{'_'.join(map(str, st.session_state.selected_lake_ids))}.csv", "text/csv", use_container_width=True)
+
+        else: 
+            st.info("ℹ️ Select parameters and lakes, then click 'Analyze Selected Lakes'.")
