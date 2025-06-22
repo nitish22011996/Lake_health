@@ -88,8 +88,9 @@ def get_effective_weights(selected_ui_options, all_df_columns):
         if param != "Land Cover": effective_weights[param] = w_main
     return effective_weights
 
+# FIX 1: Add lake_ids_tuple to the function signature to ensure the cache is unique per run.
 @st.cache_data
-def calculate_lake_health_score(_df, selected_ui_options):
+def calculate_lake_health_score(_df, selected_ui_options, lake_ids_tuple):
     df = _df.copy()
     if df.empty or not selected_ui_options: return pd.DataFrame(), {}
     def norm(x): return (x - x.min()) / (x.max() - x.min()) if x.max() != x.min() else 0.5
@@ -131,16 +132,17 @@ def calculate_lake_health_score(_df, selected_ui_options):
         total_score += final_weights[param] * factor_score_result
     latest_year_data['Health Score'] = total_score
     
-    # Ranks are now relative ONLY to the lakes being analyzed in the current batch.
     latest_year_data['Rank'] = latest_year_data['Health Score'].rank(
         ascending=False, method='min', na_option='bottom'
     ).fillna(0).astype(int)
     
-    return latest_year_data.reset_index().sort_values('Rank'), calculation_details
+    # FIX 2: Sort by Rank AND then reset the index to get a clean 0, 1, 2, ... sequence.
+    final_results = latest_year_data.reset_index().sort_values('Rank').reset_index(drop=True)
+    
+    return final_results, calculation_details
 
-# FIX: Added lake_ids to signature to ensure cache is unique per run
 @st.cache_data
-def calculate_historical_scores(_df_full, selected_ui_options, lake_ids):
+def calculate_historical_scores(_df_full, selected_ui_options, lake_ids_tuple):
     df_full = _df_full.copy()
     if df_full.empty: return pd.DataFrame()
     all_historical_data = []
@@ -148,7 +150,9 @@ def calculate_historical_scores(_df_full, selected_ui_options, lake_ids):
     for year in years:
         df_subset = df_full[df_full['Year'] <= year]
         if not df_subset.empty:
-            results, _ = calculate_lake_health_score(df_subset, selected_ui_options)
+            # Pass tuple of current lakes in subset to ensure correct caching
+            current_lakes_tuple = tuple(sorted(df_subset['Lake_ID'].unique()))
+            results, _ = calculate_lake_health_score(df_subset, selected_ui_options, current_lakes_tuple)
             if not results.empty:
                 results['Year'] = year
                 all_historical_data.append(results[['Year', 'Lake_ID', 'Health Score', 'Rank']])
@@ -159,7 +163,7 @@ def calculate_historical_scores(_df_full, selected_ui_options, lake_ids):
 
 # --- PLOTTING, AI, and PDF FUNCTIONS ---
 @st.cache_data
-def generate_grouped_plots_by_metric(_df, lake_ids, metrics):
+def generate_grouped_plots_by_metric(_df, lake_ids_tuple, metrics):
     df = _df.copy()
     grouped_images = []
     prop_cycle = plt.rcParams['axes.prop_cycle']
@@ -171,7 +175,7 @@ def generate_grouped_plots_by_metric(_df, lake_ids, metrics):
         has_data = False
         color_map = {}
 
-        for i, lake_id in enumerate(lake_ids):
+        for i, lake_id in enumerate(lake_ids_tuple):
             color_map[lake_id] = colors_cycle[i % len(colors_cycle)]
             lake_df = df[df['Lake_ID'] == lake_id].copy().sort_values("Year")
             if not lake_df.empty and metric in lake_df:
@@ -202,7 +206,7 @@ def generate_grouped_plots_by_metric(_df, lake_ids, metrics):
     return grouped_images
 
 @st.cache_data
-def plot_radar_chart(calc_details, lake_ids):
+def plot_radar_chart(calc_details, lake_ids_tuple):
     if not calc_details: return None, None, None
     params = sorted(list(next(iter(calc_details.values())).keys()))
     wrapped_params = [ '\n'.join(textwrap.wrap(p, 15)) for p in params ]
@@ -224,10 +228,11 @@ def plot_radar_chart(calc_details, lake_ids):
     return "Figure 1: Lake Health Fingerprint", buf, False
 
 @st.cache_data
-def plot_health_score_evolution(_df, confirmed_params, lake_ids):
-    historical_scores = calculate_historical_scores(_df, confirmed_params, lake_ids)
+def plot_health_score_evolution(_df, confirmed_params, lake_ids_tuple):
+    historical_scores = calculate_historical_scores(_df, confirmed_params, lake_ids_tuple)
     if historical_scores.empty: return None, None, None
     
+    lake_ids = sorted(list(lake_ids_tuple))
     n_lakes = len(lake_ids)
     ncols = min(n_lakes, 3); nrows = (n_lakes - 1) // ncols + 1
     fig, axes = plt.subplots(nrows, ncols, figsize=(4.5 * ncols, 3.5 * nrows), dpi=150, sharey=True)
@@ -246,8 +251,8 @@ def plot_health_score_evolution(_df, confirmed_params, lake_ids):
     return "Figure 2: Evolution of Overall Health Score", buf, False
 
 @st.cache_data
-def plot_holistic_trajectory_matrix(_df, _results, confirmed_params, lake_ids):
-    historical_scores = calculate_historical_scores(_df, confirmed_params, lake_ids)
+def plot_holistic_trajectory_matrix(_df, _results, confirmed_params, lake_ids_tuple):
+    historical_scores = calculate_historical_scores(_df, confirmed_params, lake_ids_tuple)
     if historical_scores.empty: return None, None, None
     trends = historical_scores.groupby('Lake_ID').apply(lambda x: linregress(x['Year'], x['Health Score']).slope if len(x['Year'].unique()) > 1 else 0)
     plot_df = _results.set_index('Lake_ID').copy(); plot_df['Overall Trend'] = trends
@@ -266,7 +271,7 @@ def plot_holistic_trajectory_matrix(_df, _results, confirmed_params, lake_ids):
     return "Figure 3: Holistic Lake Trajectory", buf, False
 
 @st.cache_data
-def plot_hdi_vs_health_correlation(_results, lake_ids):
+def plot_hdi_vs_health_correlation(_results, lake_ids_tuple):
     fig, ax = plt.subplots(figsize=(10, 7), dpi=150)
     if 'HDI' not in _results.columns or _results['HDI'].isnull().all():
         ax.text(0.5, 0.5, 'HDI data not available for this analysis.', ha='center', va='center')
@@ -283,7 +288,7 @@ def plot_hdi_vs_health_correlation(_results, lake_ids):
     return "Figure 4: HDI vs. Lake Health", buf, False
 
 @st.cache_data
-def build_detailed_ai_prompt(results, calc_details, lake_ids):
+def build_detailed_ai_prompt(results, calc_details, lake_ids_tuple):
     prompt = ("You are an expert environmental data analyst. Your goal is to provide qualitative insights, not just quantitative comparisons. "
               "Generate a detailed comparative analysis of the following lakes based on their health parameters. For each parameter group (e.g., Climate, Water Quality), "
               "identify the 'best-in-class' and 'most-at-risk' lakes. Explain the *implications* of these differences. Use numbers only to support your qualitative statements.\n\n"
@@ -337,13 +342,14 @@ class NumberedCanvas(canvas.Canvas):
         self._startPage()
 
     def save(self):
-        """FIX: Add the last page's state before creating the page numbers."""
-        self.showPage() # Save the state of the current (last) page
+        # FIX: The last page's state needs to be captured before the loop starts
+        self.showPage()
         
         num_pages = len(self._saved_page_states)
         for i, state in enumerate(self._saved_page_states):
             self.__dict__.update(state)
-            if i < num_pages - 1: # Don't draw number on the last (blank) page
+            # The final page is blank, so we subtract 1 from the total page count
+            if i < (num_pages - 1):
                 self.draw_page_number(num_pages - 1)
             canvas.Canvas.showPage(self)
         canvas.Canvas.save(self)
@@ -358,7 +364,6 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
     lake_ids = sorted(results['Lake_ID'].unique())
 
     if not lake_ids:
-        # Fallback for no data
         buffer = BytesIO()
         c = canvas.Canvas(buffer, pagesize=A4)
         c.drawString(100, A4[1] - 100, "Error: No data available to generate a report.")
@@ -428,10 +433,9 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
     # --- AI Comparison Page with Overflow Handling ---
     c.bookmarkPage('ai_comparison')
     draw_paragraph(c, "AI-Powered Detailed Comparison", title_style, 40, A4[1] - 50, A4[0] - 80, 100)
-    ai_prompt = build_detailed_ai_prompt(results, calc_details, lake_ids)
+    ai_prompt = build_detailed_ai_prompt(results, calc_details, tuple(lake_ids))
     ai_narrative = generate_ai_insight(ai_prompt).replace('\n', '<br/>')
     
-    # FIX: Logic to handle long text overflowing the page
     story = [Paragraph(ai_narrative, justified_style)]
     page_top_margin = 120; page_bottom_margin = 60
     page_width = A4[0] - 80; x_pos = 40
@@ -439,17 +443,14 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
     
     while story:
         p = story.pop(0)
-        frag = p.split(page_width, y_cursor - page_bottom_margin)
-        if len(frag) < 2: # It fits on the current page
-            p.wrapOn(c, page_width, y_cursor)
-            p.drawOn(c, x_pos, y_cursor - p.height)
-        else: # It doesn't fit, split it
-            p_fits = frag[0]
-            p_fits.wrapOn(c, page_width, y_cursor)
-            p_fits.drawOn(c, x_pos, y_cursor - p_fits.height)
-            story.insert(0, frag[1]) # Put the rest back in the story
-            c.showPage() # Create a new page
-            y_cursor = A4[1] - page_top_margin # Reset y_cursor for new page
+        w, h = p.wrapOn(c, page_width, y_cursor)
+        if h < (y_cursor - page_bottom_margin):
+            p.drawOn(c, x_pos, y_cursor - h)
+            y_cursor -= h
+        else:
+            story.insert(0, p)
+            c.showPage()
+            y_cursor = A4[1] - page_top_margin
     c.showPage()
     
     # --- Breakdown Page ---
@@ -471,7 +472,7 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
 
     # --- Parameter Plots Page ---
     c.bookmarkPage("parameter_plots")
-    plots = generate_grouped_plots_by_metric(df, lake_ids, params_to_plot)
+    plots = generate_grouped_plots_by_metric(df, tuple(lake_ids), params_to_plot)
     for i, (title, buf, _) in enumerate(plots):
         if i > 0 and i % 2 == 0: c.showPage()
         y_pos = A4[1] - 50 if i % 2 == 0 else A4[1] * 0.5 - 60
@@ -486,12 +487,11 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
     c.bookmarkPage('case_study')
     y_cursor = A4[1] - 50
     y_cursor -= draw_paragraph(c, "Case Study Analysis", title_style, 40, y_cursor, A4[0]-80, 100)
-    # FIX: Pass lake_ids to cached functions to ensure correct cache behavior
     case_study_figures = [
-        plot_radar_chart(calc_details, lake_ids), 
-        plot_health_score_evolution(df, selected_ui_options, lake_ids), 
-        plot_holistic_trajectory_matrix(df, results, selected_ui_options, lake_ids), 
-        plot_hdi_vs_health_correlation(results, lake_ids)
+        plot_radar_chart(calc_details, tuple(lake_ids)), 
+        plot_health_score_evolution(df, selected_ui_options, tuple(lake_ids)), 
+        plot_holistic_trajectory_matrix(df, results, selected_ui_options, tuple(lake_ids)), 
+        plot_hdi_vs_health_correlation(results, tuple(lake_ids))
     ]
     for i, fig_data in enumerate(case_study_figures):
         if fig_data is None or fig_data[1] is None: continue
@@ -596,7 +596,13 @@ with col2:
                 with st.spinner("Analyzing and generating PDF report..."):
                     try:
                         selected_df = df_health_full[df_health_full["Lake_ID"].isin(valid_lakes)].copy()
-                        results, calc_details = calculate_lake_health_score(selected_df, st.session_state.confirmed_parameters)
+                        
+                        # Pass tuple of lake IDs to ensure correct caching
+                        results, calc_details = calculate_lake_health_score(
+                            selected_df, 
+                            st.session_state.confirmed_parameters,
+                            tuple(sorted(valid_lakes))
+                        )
                         
                         if results.empty:
                             st.error("Analysis could not be completed for the selected lakes.")
