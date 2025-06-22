@@ -40,7 +40,7 @@ PARAMETER_PROPERTIES = {
 LAND_COVER_INTERNAL_COLS = ['Barren Area', 'Urban Area', 'Vegetation Area']
 
 
-# --- CORE DATA & ANALYSIS FUNCTIONS (No changes needed) ---
+# --- CORE DATA & ANALYSIS FUNCTIONS (Unchanged) ---
 @st.cache_data
 def prepare_all_data(health_path, location_path):
     try:
@@ -146,8 +146,7 @@ def calculate_historical_scores(_df_full, selected_ui_options):
     historical_df['Rank'] = historical_df.groupby('Year')['Health Score'].rank(ascending=False, method='min').astype(int)
     return historical_df
 
-
-# --- PLOTTING, AI, and PDF FUNCTIONS (No changes needed) ---
+# --- PLOTTING, AI, and PDF FUNCTIONS (Unchanged) ---
 @st.cache_data
 def generate_grouped_plots_by_metric(_df, lake_ids, metrics):
     df = _df.copy()
@@ -402,16 +401,23 @@ df_health_full, df_location, ui_options = prepare_all_data(HEALTH_DATA_PATH, LOC
 if df_health_full is None: st.stop()
 
 # --- STATE MANAGEMENT ---
-if 'confirmed_parameters' not in st.session_state: st.session_state.confirmed_parameters = []
-if "selected_lake_ids" not in st.session_state: st.session_state.selected_lake_ids = []
-if 'analysis_results' not in st.session_state: st.session_state.analysis_results = None
+if 'confirmed_parameters' not in st.session_state:
+    st.session_state.confirmed_parameters = []
+if 'lake_id_text' not in st.session_state:
+    st.session_state.lake_id_text = ""
+if 'analysis_results' not in st.session_state:
+    st.session_state.analysis_results = None
 
+# --- NEW 3-COLUMN LAYOUT ---
+col1, col2, col3 = st.columns([1, 2, 2])
 
-# --- SIDEBAR UI ---
-with st.sidebar:
-    st.header("1. Select Parameters")
-    
-    # Store temporary checkbox selections in a separate dictionary
+# --- COLUMN 1: CONTROLS (NO SIDEBAR) ---
+with col1:
+    st.header("Controls")
+    st.markdown("---")
+
+    # --- Parameter Selection ---
+    st.subheader("1. Select Parameters")
     temp_selections = {}
     for param in ui_options:
         temp_selections[param] = st.checkbox(
@@ -421,31 +427,38 @@ with st.sidebar:
 
     if st.button("Set Parameters", use_container_width=True):
         st.session_state.confirmed_parameters = [p for p, selected in temp_selections.items() if selected]
-        st.session_state.analysis_results = None # Reset results on change
+        st.session_state.analysis_results = None  # Reset results on change
 
-    st.divider()
-    st.header("2. Select Lakes")
+    st.markdown("---")
+    
+    # --- Lake Selection ---
+    st.subheader("2. Select Lakes")
     sorted_states = sorted(df_location['State'].unique())
-    selected_state = st.selectbox("Select State", sorted_states)
+    selected_state = st.selectbox("Select State", sorted_states, key="state_selector")
+    
     filtered_districts = df_location[df_location['State'] == selected_state]['District'].unique()
-    selected_district = st.selectbox("Select District", sorted(filtered_districts))
+    selected_district = st.selectbox("Select District", sorted(filtered_districts), key="district_selector")
+    
     filtered_lakes_by_loc = df_location[(df_location['State'] == selected_state) & (df_location['District'] == selected_district)]
     lake_ids_in_district = sorted(filtered_lakes_by_loc['Lake_ID'].unique())
     
     if lake_ids_in_district:
-        selected_lake_id = st.selectbox("Select a Lake ID to Add", lake_ids_in_district)
+        lake_to_add = st.selectbox("Select a Lake ID to Add", lake_ids_in_district, key="lake_add_selector")
         if st.button("Add Lake for Comparison", use_container_width=True):
-            if selected_lake_id not in st.session_state.selected_lake_ids:
-                st.session_state.selected_lake_ids.append(selected_lake_id)
-                st.session_state.selected_lake_ids.sort()
-                st.session_state.analysis_results = None # Reset results
+            try:
+                # Read current IDs from the text box state
+                current_ids = {int(x.strip()) for x in st.session_state.lake_id_text.split(",") if x.strip()}
+                current_ids.add(lake_to_add)
+                # Update the text box state
+                st.session_state.lake_id_text = ", ".join(map(str, sorted(list(current_ids))))
+                st.session_state.analysis_results = None
+            except Exception:
+                pass # Ignore parsing errors if box is malformed
     else: 
         st.warning("No lakes found in this district.")
 
-# --- MAIN PAGE UI ---
-col1, col2 = st.columns(2)
-
-with col1:
+# --- COLUMN 2: MAP ---
+with col2:
     st.subheader(f"📍 Map of Lakes in {selected_district}, {selected_state}")
     if not filtered_lakes_by_loc.empty:
         map_center = [filtered_lakes_by_loc['Lat'].mean(), filtered_lakes_by_loc['Lon'].mean()]
@@ -455,32 +468,28 @@ with col1:
             folium.Marker([row['Lat'], row['Lon']], popup=f"<b>Lake ID:</b> {row['Lake_ID']}", tooltip=f"Lake ID: {row['Lake_ID']}", icon=folium.Icon(color='blue', icon='water')).add_to(marker_cluster)
         st_folium(m, height=500, use_container_width=True)
 
-with col2:
+# --- COLUMN 3: ANALYSIS & RESULTS ---
+with col3:
     st.subheader("🔬 Lakes Selected for Analysis")
-    
-    # This text area now just displays the state. The button handles adding.
-    # Manual editing is possible but less central to the workflow.
-    ids_as_text = ", ".join(map(str, st.session_state.selected_lake_ids))
-    edited_text = st.text_area(
-        "Selected Lake IDs (edit here if needed)", 
-        value=ids_as_text,
+
+    # The text area's state is the single source of truth
+    st.text_area(
+        "Selected Lake IDs (add from controls or edit here)",
+        key="lake_id_text",
         height=50
     )
-    # Sync state if text area was changed manually
+    
+    # Parse the text area to get the list of lakes to analyze
     try:
-        ids_from_box = sorted([int(x.strip()) for x in edited_text.split(",") if x.strip()]) if edited_text else []
-        if ids_from_box != st.session_state.selected_lake_ids:
-            st.session_state.selected_lake_ids = ids_from_box
-            st.session_state.analysis_results = None
+        lake_ids_to_analyze = sorted([int(x.strip()) for x in st.session_state.lake_id_text.split(",") if x.strip()])
     except (ValueError, TypeError):
-        st.warning("Invalid input. Please enter only comma-separated numbers.")
-
+        st.error("Invalid input in Lake IDs box. Please use comma-separated numbers.")
+        lake_ids_to_analyze = []
 
     if st.session_state.confirmed_parameters:
         param_str = ", ".join(f"`{p}`" for p in st.session_state.confirmed_parameters)
         st.info(f"**Active Parameters:** {param_str}")
 
-    lake_ids_to_analyze = st.session_state.get("selected_lake_ids", [])
     is_disabled = not lake_ids_to_analyze or not st.session_state.confirmed_parameters
     
     if st.button("🚀 Analyze Selected Lakes", disabled=is_disabled, use_container_width=True, type="primary"):
@@ -501,6 +510,7 @@ with col2:
     
     st.divider()
 
+    # This section will now render correctly because the app doesn't crash
     if st.session_state.analysis_results is not None and not st.session_state.analysis_results.empty:
         st.subheader("📊 Health Score Results")
         st.dataframe(st.session_state.analysis_results[["Lake_ID", "Health Score", "Rank"]].style.format({"Health Score": "{:.3f}"}), use_container_width=True)
