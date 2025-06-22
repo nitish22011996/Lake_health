@@ -20,10 +20,8 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.utils import ImageReader
 from reportlab.lib import colors
-from reportlab.platypus import Paragraph, Table, TableStyle, PageBreak
+from reportlab.platypus import Paragraph, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.platypus.doctemplate import BaseDocTemplate, PageTemplate, Frame
-from reportlab.platypus import Paragraph
 from matplotlib.ticker import MaxNLocator
 
 # --- CONFIGURATION ---
@@ -348,6 +346,22 @@ class NumberedCanvas(canvas.Canvas):
         self.drawRightString(A4[0] - 20, 20, f"Page {self._pageNumber} of {page_count}")
 
 def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selected_ui_options):
+    # --- FIX: Sanitize all inputs to ensure they only contain data for the selected lakes ---
+    results = results[results['Lake_ID'].isin(lake_ids)].copy()
+    calc_details = {k: v for k, v in calc_details.items() if k in lake_ids}
+    
+    # Re-validate the list of lake_ids based on what data is actually available in the results
+    lake_ids = sorted(results['Lake_ID'].unique())
+
+    # Handle edge case where no data exists for any selected lake
+    if not lake_ids:
+        buffer = BytesIO()
+        c = canvas.Canvas(buffer, pagesize=A4)
+        c.drawString(100, A4[1] - 100, "Error: No data available for the selected lakes to generate a report.")
+        c.save()
+        buffer.seek(0)
+        return buffer
+        
     buffer = BytesIO()
     c = NumberedCanvas(buffer, pagesize=A4)
     styles = getSampleStyleSheet()
@@ -362,13 +376,13 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
         p.drawOn(canvas_obj, x, y - p.height)
         return p.height
         
-    # --- Page 1: Table of Contents ---
+    # --- Page 1: Title & Bookmarks ---
     c.setTitle("Lake Health Report")
     y_cursor = A4[1] - 50
-    # PDF IMPROVEMENT: Title changed and overlap fixed
     y_cursor -= draw_paragraph(c, "Lake Health Report", title_style, 40, y_cursor, A4[0] - 80, 100)
-    y_cursor -= 30 # Space between title and TOC
-    y_cursor -= draw_paragraph(c, "Table of Contents", header_style, 40, y_cursor, A4[0] - 80, 50)
+    y_cursor -= 30 # Space between title and bookmarks
+    
+    # --- FIX: Removed the "Table of Contents" heading ---
     
     final_weights = get_effective_weights(selected_ui_options, df.columns)
     params_to_plot = sorted([p for p in final_weights.keys() if p != 'HDI'])
@@ -397,6 +411,7 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
     y_cursor -= draw_paragraph(c, "Scores are calculated on a normalized scale from 0 (lowest health) to 1 (highest health).", subtitle_style, 40, y_cursor, A4[0]-80, 50)
     
     bar_start_x = 60; bar_height = 18; max_bar_width = A4[0] - bar_start_x - 150
+    # Now this loop will only iterate over the correctly filtered 'results'
     for _, row in results.iterrows():
         if y_cursor < 150: c.showPage(); y_cursor = A4[1] - 80
         score = row['Health Score']; rank = int(row['Rank'])
@@ -423,6 +438,7 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
     c.showPage(); c.bookmarkPage('breakdown')
     y_cursor = A4[1] - 50
     y_cursor -= draw_paragraph(c, "Health Score Calculation Breakdown", title_style, 40, y_cursor, A4[0]-80, 100)
+    # This loop now iterates over the clean 'lake_ids' and uses the clean 'calc_details'
     for lake_id in lake_ids:
         if lake_id not in calc_details: continue
         table_data = [['Parameter', 'Raw Val', 'Norm Pres.', 'Norm Trend', 'Norm P-Val', 'Factor Score', 'Weight', 'Contrib.']]
@@ -436,6 +452,7 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
         table.drawOn(c, 40, y_cursor - table_height); y_cursor -= (table_height + 20)
 
     c.showPage(); c.bookmarkPage("parameter_plots")
+    # This function is now guaranteed to receive clean data.
     plots = generate_grouped_plots_by_metric(df, lake_ids, params_to_plot)
     for i, (title, buf, _) in enumerate(plots):
         if i > 0 and i % 2 == 0: c.showPage()
@@ -449,6 +466,7 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
     c.showPage(); c.bookmarkPage('case_study')
     y_cursor = A4[1] - 50
     y_cursor -= draw_paragraph(c, "Case Study Analysis", title_style, 40, y_cursor, A4[0]-80, 100)
+    # The plotting functions are now guaranteed to receive clean data.
     case_study_figures = [plot_radar_chart(calc_details), plot_health_score_evolution(df, selected_ui_options), plot_holistic_trajectory_matrix(df, results, selected_ui_options), plot_hdi_vs_health_correlation(results)]
     for i, fig_data in enumerate(case_study_figures):
         if fig_data is None or fig_data[1] is None: continue
@@ -544,7 +562,7 @@ with col2:
                         results, calc_details = calculate_lake_health_score(selected_df, st.session_state.confirmed_parameters)
                         pdf_buffer = generate_comparative_pdf_report(selected_df, results, calc_details, lake_ids_to_analyze, st.session_state.confirmed_parameters)
                         
-                        st.session_state.analysis_results = results
+                        st.session_state.analysis_results = results[results['Lake_ID'].isin(lake_ids_to_analyze)]
                         st.session_state.pdf_buffer = pdf_buffer
                         st.session_state.analysis_complete = True
                 except Exception as e: 
