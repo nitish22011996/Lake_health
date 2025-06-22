@@ -40,7 +40,7 @@ PARAMETER_PROPERTIES = {
 LAND_COVER_INTERNAL_COLS = ['Barren Area', 'Urban Area', 'Vegetation Area']
 
 
-# --- CORE DATA & ANALYSIS FUNCTIONS (Unchanged) ---
+# --- CORE DATA & ANALYSIS FUNCTIONS ---
 @st.cache_data
 def prepare_all_data(health_path, location_path):
     try:
@@ -126,7 +126,15 @@ def calculate_lake_health_score(_df, selected_ui_options):
                 calculation_details[lake_id][param] = {'Raw Value': latest_values.loc[lake_id], 'Norm Pres.': pv_score, 'Norm Trend': s_norm, 'Norm P-Val': p_norm, 'Factor Score': factor_score, 'Weight': final_weights[param], 'Contribution': factor_score * final_weights[param]}
         total_score += final_weights[param] * factor_score_result
     latest_year_data['Health Score'] = total_score
-    latest_year_data['Rank'] = latest_year_data['Health Score'].rank(ascending=False, method='min').astype(int)
+    
+    # --- CRITICAL FIX for IntCastingNaNError ---
+    # The rank method can produce NaNs if the score is NaN.
+    # na_option='bottom' pushes NaNs to the end of the ranking.
+    # .fillna(0) handles any edge cases before converting to integer.
+    latest_year_data['Rank'] = latest_year_data['Health Score'].rank(
+        ascending=False, method='min', na_option='bottom'
+    ).fillna(0).astype(int)
+    
     return latest_year_data.reset_index().sort_values('Rank'), calculation_details
 
 @st.cache_data
@@ -143,7 +151,7 @@ def calculate_historical_scores(_df_full, selected_ui_options):
                 all_historical_data.append(results[['Year', 'Lake_ID', 'Health Score', 'Rank']])
     if not all_historical_data: return pd.DataFrame()
     historical_df = pd.concat(all_historical_data).reset_index(drop=True)
-    historical_df['Rank'] = historical_df.groupby('Year')['Health Score'].rank(ascending=False, method='min').astype(int)
+    historical_df['Rank'] = historical_df.groupby('Year')['Health Score'].rank(ascending=False, method='min', na_option='bottom').fillna(0).astype(int)
     return historical_df
 
 # --- PLOTTING, AI, and PDF FUNCTIONS (Unchanged) ---
@@ -401,51 +409,75 @@ df_health_full, df_location, ui_options = prepare_all_data(HEALTH_DATA_PATH, LOC
 if df_health_full is None: st.stop()
 
 # --- STATE MANAGEMENT ---
+if 'analysis_results' not in st.session_state:
+    st.session_state.analysis_results = None
 if 'confirmed_parameters' not in st.session_state:
     st.session_state.confirmed_parameters = []
 if 'selected_lake_ids' not in st.session_state:
     st.session_state.selected_lake_ids = []
-if 'analysis_results' not in st.session_state:
-    st.session_state.analysis_results = None
 
 # --- NEW 2-COLUMN LAYOUT (CONTROLS | MAIN CONTENT) ---
-col_controls, col_main = st.columns([1, 3])
+col_controls, col_main = st.columns([1, 2.5]) # Give more space to the main content
 
 # --- COLUMN 1: CONTROLS (Static and Always Visible) ---
 with col_controls:
-    with st.container(border=True):
+    st.header("⚙️ Control Panel")
+    
+    # --- 1. Parameter Selection using Form for Stability ---
+    with st.form(key='parameter_form'):
         st.subheader("1. Select Parameters")
-        # Using st.multiselect for a stable, clean selection experience.
-        # This acts like a checklist and is the standard, robust way to handle this.
-        confirmed_parameters = st.multiselect(
-            "Select parameters for analysis:",
-            options=ui_options,
-            default=st.session_state.confirmed_parameters,
-            key="parameter_selector"
-        )
-        st.session_state.confirmed_parameters = confirmed_parameters
+        
+        # Use a dictionary to capture the state of checkboxes inside the form
+        temp_selections = {}
+        for param in ui_options:
+            # The value is pre-filled based on the session state
+            temp_selections[param] = st.checkbox(
+                param, 
+                value=(param in st.session_state.confirmed_parameters)
+            )
+        
+        # The form submit button is the single point of action
+        submitted_params = st.form_submit_button("Set Parameters", use_container_width=True)
+        if submitted_params:
+            st.session_state.confirmed_parameters = [p for p, selected in temp_selections.items() if selected]
+            st.session_state.analysis_results = None  # Reset results on change
+            st.rerun() # Rerun to reflect the new parameter selection immediately
 
-    with st.container(border=True):
-        st.subheader("2. Select Lakes")
-        sorted_states = sorted(df_location['State'].unique())
-        selected_state = st.selectbox("Filter by State:", sorted_states, key="state_selector")
-        
-        filtered_districts = df_location[df_location['State'] == selected_state]['District'].unique()
-        selected_district = st.selectbox("Filter by District:", sorted(filtered_districts), key="district_selector")
-        
-        # All lakes from the filtered district are available for selection
-        available_lakes = df_location[(df_location['State'] == selected_state) & (df_location['District'] == selected_district)]['Lake_ID'].unique()
-        
-        # The multiselect widget is the single source of truth for selected lakes
-        selected_lake_ids = st.multiselect(
-            "Select lakes for analysis:",
-            options=sorted(available_lakes),
-            default=st.session_state.selected_lake_ids,
-            key="lake_selector"
-        )
-        st.session_state.selected_lake_ids = selected_lake_ids
+    # Display confirmed parameters
+    if st.session_state.confirmed_parameters:
+        st.info(f"**Active Parameters:** {', '.join(f'`{p}`' for p in st.session_state.confirmed_parameters)}")
+    else:
+        st.warning("Please select one or more parameters.")
 
-    # --- ANALYSIS BUTTON ---
+    st.markdown("---")
+
+    # --- 2. Lake Selection ---
+    st.subheader("2. Select Lakes")
+    sorted_states = sorted(df_location['State'].unique())
+    selected_state = st.selectbox("Filter by State:", sorted_states, key="state_selector")
+    
+    filtered_districts = df_location[df_location['State'] == selected_state]['District'].unique()
+    selected_district = st.selectbox("Filter by District:", sorted(filtered_districts), key="district_selector")
+    
+    available_lakes = df_location[(df_location['State'] == selected_state) & (df_location['District'] == selected_district)]['Lake_ID'].unique()
+    
+    # st.multiselect is stable for selecting from a list and showing selections
+    selected_lakes = st.multiselect(
+        "Select lakes for analysis:",
+        options=sorted(available_lakes),
+        default=st.session_state.selected_lake_ids,
+        key="lake_multiselect"
+    )
+    # Always sync the session state with the widget's current state
+    if selected_lakes != st.session_state.selected_lake_ids:
+        st.session_state.selected_lake_ids = selected_lakes
+        st.session_state.analysis_results = None # Reset results
+        st.rerun()
+    
+    st.markdown("---")
+
+    # --- 3. Analysis Button ---
+    st.subheader("3. Run Analysis")
     is_disabled = not st.session_state.selected_lake_ids or not st.session_state.confirmed_parameters
     if st.button("🚀 Analyze Selected Lakes", disabled=is_disabled, use_container_width=True, type="primary"):
         st.session_state.analysis_results = None
@@ -476,11 +508,10 @@ with col_main:
             m = folium.Map(location=map_center, zoom_start=8)
             marker_cluster = MarkerCluster().add_to(m)
             for _, row in filtered_lakes_by_loc.iterrows():
-                # Highlight selected lakes
                 is_selected = row['Lake_ID'] in st.session_state.selected_lake_ids
                 folium.Marker(
                     [row['Lat'], row['Lon']],
-                    popup=f"<b>Lake ID:</b> {row['Lake_ID']}",
+                    popup=f"<b>Lake ID:</b> {row['Lake_ID']} {'(Selected)' if is_selected else ''}",
                     tooltip=f"Lake ID: {row['Lake_ID']}",
                     icon=folium.Icon(color='green' if is_selected else 'blue', icon='water')
                 ).add_to(marker_cluster)
@@ -495,11 +526,9 @@ with col_main:
             
             with st.container(border=True):
                 st.subheader("Download Center")
-                # Use two columns for download buttons
                 dl_col1, dl_col2 = st.columns(2)
                 
                 with dl_col1:
-                    # PDF generation is computationally expensive, so we do it on demand
                     if st.button("📄 Generate Full PDF Report", use_container_width=True):
                          with st.spinner("Generating PDF Report... Please wait."):
                             pdf_buffer = generate_comparative_pdf_report(df_health_full[df_health_full["Lake_ID"].isin(st.session_state.selected_lake_ids)], st.session_state.analysis_results, st.session_state.calc_details, st.session_state.selected_lake_ids, st.session_state.confirmed_parameters)
@@ -519,4 +548,4 @@ with col_main:
                     st.download_button("📥 Download Filtered Data (CSV)", csv_data, f"data_{'_'.join(map(str, st.session_state.selected_lake_ids))}.csv", "text/csv", use_container_width=True)
 
         else: 
-            st.info("ℹ️ Select parameters and lakes, then click 'Analyze Selected Lakes'.")
+            st.info("ℹ️ Select parameters and lakes from the control panel, then click 'Analyze Selected Lakes'.")
