@@ -344,10 +344,52 @@ def generate_ai_insight(prompt):
 
 
 # --- PDF GENERATION WITH ROBUST TWO-PASS MANUAL CANVAS METHOD ---
-def _draw_report_content(c, total_pages, data):
-    """A helper function to draw all content onto the canvas."""
-    # Unpack data
-    df, results, calc_details, lake_ids, selected_ui_options = data
+class NumberedCanvas(canvas.Canvas):
+    """
+    A custom canvas class to handle page numbering.
+    The `save` method is modified to loop through the saved page states
+    and draw the page number on each page.
+    """
+    def __init__(self, *args, **kwargs):
+        canvas.Canvas.__init__(self, *args, **kwargs)
+        self._saved_page_states = []
+        self._page_count = 0
+
+    def showPage(self):
+        self._saved_page_states.append(dict(self.__dict__))
+        self._startPage()
+
+    def save(self):
+        """Add page numbers to each page and save the document."""
+        page_count = len(self._saved_page_states)
+        for state in self._saved_page_states:
+            self.__dict__.update(state)
+            self.draw_page_number(page_count)
+            canvas.Canvas.showPage(self)
+        canvas.Canvas.save(self)
+
+    def draw_page_number(self, page_count):
+        self.setFont("Helvetica", 9)
+        self.drawRightString(A4[0] - 20, 20, f"Page {self._pageNumber} of {page_count}")
+
+
+def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selected_ui_options):
+    buffer = BytesIO()
+    
+    # Sanitize data to be safe
+    results = results[results['Lake_ID'].isin(lake_ids)].copy()
+    calc_details = {k: v for k, v in calc_details.items() if k in lake_ids}
+    lake_ids = sorted(results['Lake_ID'].unique())
+    
+    if not lake_ids:
+        c = canvas.Canvas(buffer, pagesize=A4)
+        c.drawString(100, A4[1] - 100, "Error: No data available to generate a report.")
+        c.save()
+        buffer.seek(0)
+        return buffer
+
+    # Use the robust NumberedCanvas
+    c = NumberedCanvas(buffer, pagesize=A4)
     
     # Define styles
     styles = getSampleStyleSheet()
@@ -362,46 +404,43 @@ def _draw_report_content(c, total_pages, data):
         p.drawOn(canvas_obj, x, y - p.height)
         return p.height
     
-    def draw_page_number():
-        if total_pages: # Only draw if total_pages is known (on the second pass)
-            c.setFont("Helvetica", 9)
-            c.drawRightString(A4[0] - 20, 20, f"Page {c.getPageNumber()} of {total_pages}")
-    
     # --- Page 1: Title & Bookmarks ---
     c.setTitle("Lake Health Report")
     y_cursor = A4[1] - 50
     y_cursor -= draw_paragraph(c, "Lake Health Report", title_style, 40, y_cursor, A4[0] - 80, 100)
     y_cursor -= 30
+    
+    # Create bookmarks (links)
     params_to_plot = sorted([p for p in get_effective_weights(selected_ui_options, df.columns).keys() if p != 'HDI'])
     bookmarks = [("Health Score Ranking", "ranking", 0), ("AI-Powered Detailed Comparison", "ai_comparison", 0),
                  ("Health Score Calculation Breakdown", "breakdown", 0), ("Parameter Trend Plots", "parameter_plots", 0)]
     for p in params_to_plot:
         bookmarks.append((f"Trend for: {p}", f"plot_{p.replace(' ', '_')}", 1))
     bookmarks.append(("Case Study Analysis", "case_study", 0))
+
     for title, key, level in bookmarks:
         c.addOutlineEntry(title, key, level=level, closed=False)
         c.drawString(60 + (level*20), y_cursor, title)
         c.linkRect("", key, (50, y_cursor - 5, 550, y_cursor + 15), relative=1, thickness=0)
         y_cursor -= 20
-    draw_page_number()
     c.showPage()
 
     # --- Ranking Page ---
-    c.bookmarkPage('ranking')
+    c.bookmarkPage('ranking') # Define the destination for the link
     y_cursor = A4[1] - 80
     y_cursor -= draw_paragraph(c, "Health Score Ranking", header_style, 40, y_cursor, A4[0]-80, 50)
+    # ... rest of the ranking content ...
     bar_start_x = 60; bar_height = 18; max_bar_width = A4[0] - bar_start_x - 150
     for _, row in results.iterrows():
         if y_cursor < 150:
-            draw_page_number(); c.showPage(); y_cursor = A4[1] - 80
+            c.showPage(); y_cursor = A4[1] - 80
         score = row['Health Score']; rank = int(row['Rank'])
         color = colors.darkgreen if score > 0.75 else colors.orange if score > 0.5 else colors.firebrick
         c.setFillColor(color); c.rect(bar_start_x, y_cursor - bar_height, max(0, score) * max_bar_width, bar_height, fill=1, stroke=0)
         c.setFillColor(colors.black); c.setFont("Helvetica", 9); c.drawString(bar_start_x + 5, y_cursor - bar_height + 5, f"Lake {row['Lake_ID']} (Rank {rank}) - Score: {score:.3f}")
         y_cursor -= (bar_height + 10)
-    draw_page_number()
     c.showPage()
-
+    
     # --- AI Comparison Page ---
     c.bookmarkPage('ai_comparison')
     ai_prompt = build_detailed_ai_prompt(results, calc_details, tuple(lake_ids))
@@ -421,34 +460,68 @@ def _draw_report_content(c, total_pages, data):
             if frags:
                 frags[0].wrapOn(c, page_width, available_height); frags[0].drawOn(c, x_pos, y_cursor - frags[0].height)
             story.extend(frags[1:])
-            draw_page_number(); c.showPage()
+            c.showPage()
             y_cursor = A4[1] - page_top_margin
             available_height = y_cursor - page_bottom_margin
-    draw_page_number()
     c.showPage()
     
-    # --- Other sections ---
-    # (The same logic would be applied for all other sections, using `draw_page_number(); c.showPage()` when needed)
+    # --- Breakdown Page ---
+    c.bookmarkPage('breakdown')
+    y_cursor = A4[1] - 50
+    y_cursor -= draw_paragraph(c, "Health Score Calculation Breakdown", title_style, 40, y_cursor, A4[0]-80, 100)
+    for lake_id in lake_ids:
+        if y_cursor < 200: c.showPage(); y_cursor = A4[1] - 80
+        y_cursor -= draw_paragraph(c, f"Breakdown for Lake {lake_id}", header_style, 40, y_cursor, A4[0]-80, 50)
+        table_data = [['Parameter', 'Raw Val', 'Norm Pres.', 'Norm Trend', 'Norm P-Val', 'Factor Score', 'Weight', 'Contrib.']]
+        for param, details in sorted(calc_details[lake_id].items()):
+             table_data.append([param[:18], f"{details.get('Raw Value', 0):.2f}", f"{details.get('Norm Pres.', 0):.3f}", f"{details.get('Norm Trend', 'N/A')}" if isinstance(details.get('Norm Trend'), str) else f"{details.get('Norm Trend', 0):.3f}", f"{details.get('Norm P-Val', 'N/A')}" if isinstance(details.get('Norm P-Val'), str) else f"{details.get('Norm P-Val', 0):.3f}", f"{details.get('Factor Score', 0):.3f}", f"{details.get('Weight', 0):.3f}", f"{details.get('Contribution', 0):.3f}",])
+        table = Table(table_data, colWidths=[110, 60, 60, 60, 60, 60, 50, 60])
+        table.setStyle(TableStyle([('BACKGROUND', (0,0), (-1,0), colors.darkslategray), ('TEXTCOLOR',(0,0),(-1,0),colors.whitesmoke), ('ALIGN', (0,0), (-1,-1), 'CENTER'), ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'), ('FONTSIZE', (0,0), (-1,-1), 7), ('BOTTOMPADDING', (0,0), (-1,0), 10), ('BACKGROUND', (0,1), (-1,-1), colors.antiquewhite), ('GRID', (0,0), (-1,-1), 1, colors.black)]))
+        w, h = table.wrap(A4[0]-80, y_cursor)
+        if y_cursor < h: c.showPage(); y_cursor = A4[1] - 80
+        table.drawOn(c, 40, y_cursor - h); y_cursor -= (h + 20)
+    c.showPage()
 
+    # --- Parameter Plots Page ---
+    c.bookmarkPage("parameter_plots")
+    plots = generate_grouped_plots_by_metric(df, tuple(lake_ids), params_to_plot)
+    for i, (title, buf, _) in enumerate(plots):
+        if i > 0 and i % 2 == 0: c.showPage()
+        y_pos = A4[1] - 50 if i % 2 == 0 else A4[1] * 0.5 - 60
+        img_y_pos = A4[1] * 0.5 - 20 if i % 2 == 0 else 20
+        c.bookmarkPage(f"plot_{title.replace('Trend for: ', '').replace(' ', '_')}")
+        c.setFont("Helvetica-Bold", 14); c.drawCentredString(A4[0] / 2, y_pos, title)
+        c.drawImage(ImageReader(buf), 40, img_y_pos, width=A4[0] - 80, height=A4[1] * 0.45 - 40, preserveAspectRatio=True)
+        if i % 2 == 0 and i + 1 < len(plots): c.line(40, A4[1]*0.5 - 40, A4[0] - 40, A4[1]*0.5 - 40)
+    c.showPage()
 
-def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selected_ui_options):
-    buffer = BytesIO()
-    data_package = (df, results, calc_details, lake_ids, selected_ui_options)
+    # --- Case Study Page ---
+    c.bookmarkPage('case_study')
+    y_cursor = A4[1] - 50
+    y_cursor -= draw_paragraph(c, "Case Study Analysis", title_style, 40, y_cursor, A4[0]-80, 100)
+    case_study_figures = [
+        plot_radar_chart(calc_details, tuple(lake_ids)), 
+        plot_health_score_evolution(df, selected_ui_options, tuple(lake_ids)), 
+        plot_holistic_trajectory_matrix(df, results, selected_ui_options, tuple(lake_ids)), 
+        plot_hdi_vs_health_correlation(results, tuple(lake_ids))
+    ]
+    for i, fig_data in enumerate(case_study_figures):
+        if fig_data is None or fig_data[1] is None: continue
+        if i > 0 : c.showPage()
+        title, buf, _ = fig_data
+        data_summary = f"Analysis of lakes {lake_ids} with parameters {selected_ui_options}."
+        ai_narrative = generate_ai_insight(ai_prompt).replace('\n', '<br/>')
+        y_cursor = A4[1] - 80
+        y_cursor -= draw_paragraph(c, title, header_style, 40, y_cursor, A4[0]-80, 100)
+        c.drawImage(ImageReader(buf), 40, y_cursor - (A4[1] * 0.5), width=A4[0]-80, height=A4[1] * 0.5, preserveAspectRatio=True)
+        y_cursor -= (A4[1] * 0.5 + 20)
+        draw_paragraph(c, ai_narrative, justified_style, 40, y_cursor, A4[0]-80, A4[1]*0.4 - 40)
     
-    # Pass 1: Draw to a dummy canvas to count pages
-    dummy_buffer = BytesIO()
-    dummy_canvas = canvas.Canvas(dummy_buffer, pagesize=A4)
-    _draw_report_content(dummy_canvas, None, data_package)
-    total_pages = dummy_canvas.getPageNumber()
-    
-    # Pass 2: Draw to the final canvas with the correct total page count
-    final_canvas = canvas.Canvas(buffer, pagesize=A4)
-    _draw_report_content(final_canvas, total_pages, data_package)
-    final_canvas.save()
+    # Finalize the PDF
+    c.save()
     
     buffer.seek(0)
     return buffer
-
 
 # --- STREAMLIT APP LAYOUT (SINGLE PAGE DASHBOARD) ---
 st.title("Lake Health Report")
