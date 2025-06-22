@@ -40,7 +40,7 @@ PARAMETER_PROPERTIES = {
 LAND_COVER_INTERNAL_COLS = ['Barren Area', 'Urban Area', 'Vegetation Area']
 
 
-# --- CORE DATA & ANALYSIS FUNCTIONS ---
+# --- CORE DATA & ANALYSIS FUNCTIONS (No changes needed) ---
 @st.cache_data
 def prepare_all_data(health_path, location_path):
     try:
@@ -147,7 +147,7 @@ def calculate_historical_scores(_df_full, selected_ui_options):
     return historical_df
 
 
-# --- PLOTTING FUNCTIONS ---
+# --- PLOTTING, AI, and PDF FUNCTIONS (No changes needed) ---
 @st.cache_data
 def generate_grouped_plots_by_metric(_df, lake_ids, metrics):
     df = _df.copy()
@@ -256,8 +256,6 @@ def plot_hdi_vs_health_correlation(_results):
     plt.tight_layout(); buf = BytesIO(); plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.3); plt.close(fig)
     return "Figure 4: HDI vs. Lake Health", buf, False
 
-
-# --- AI & PDF GENERATION ---
 @st.cache_data
 def build_detailed_ai_prompt(results, calc_details):
     prompt = ("You are an expert environmental data analyst. Your goal is to provide qualitative insights, not just quantitative comparisons. "
@@ -395,7 +393,7 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
     return buffer
 
 
-# --- STREAMLIT APP LAYOUT ---
+# --- STREAMLIT APP LAYOUT (STABLE VERSION) ---
 st.set_page_config(layout="wide")
 st.title("🌊 Dynamic Lake Health Dashboard")
 
@@ -404,49 +402,26 @@ df_health_full, df_location, ui_options = prepare_all_data(HEALTH_DATA_PATH, LOC
 if df_health_full is None: st.stop()
 
 # --- STATE MANAGEMENT ---
-# Initialize state only if keys are not already present
 if 'confirmed_parameters' not in st.session_state: st.session_state.confirmed_parameters = []
 if "selected_lake_ids" not in st.session_state: st.session_state.selected_lake_ids = []
 if 'analysis_results' not in st.session_state: st.session_state.analysis_results = None
-if 'lake_id_input' not in st.session_state: st.session_state.lake_id_input = ", ".join(map(str, st.session_state.selected_lake_ids))
-
-# --- UI CALLBACKS (Robust state handling) ---
-def update_lake_ids_from_input():
-    """Parses the text input and updates the canonical list of lake IDs."""
-    try:
-        text_input = st.session_state.lake_id_input
-        new_ids = sorted([int(x.strip()) for x in text_input.split(",") if x.strip()]) if text_input else []
-        if new_ids != st.session_state.selected_lake_ids:
-            st.session_state.selected_lake_ids = new_ids
-            st.session_state.analysis_results = None # Reset results if IDs change
-    except (ValueError, TypeError):
-        st.warning("Invalid input detected. Please enter comma-separated numbers only.")
-
-def add_lake_id():
-    """Adds a lake from the dropdown to the list."""
-    selected_lake_id = st.session_state.lake_selector
-    if selected_lake_id not in st.session_state.selected_lake_ids:
-        st.session_state.selected_lake_ids.append(selected_lake_id)
-        st.session_state.selected_lake_ids.sort()
-        st.session_state.lake_id_input = ", ".join(map(str, st.session_state.selected_lake_ids))
-        st.session_state.analysis_results = None # Reset results
-
-def set_parameters():
-    """Updates the parameter list based on checkbox selections."""
-    st.session_state.confirmed_parameters = [p for p, selected in st.session_state.items() if p.startswith("param_") and selected]
-    # Clean up the key name for the list
-    st.session_state.confirmed_parameters = [p.replace("param_", "") for p in st.session_state.confirmed_parameters]
-    st.session_state.analysis_results = None # Reset results
 
 
 # --- SIDEBAR UI ---
 with st.sidebar:
     st.header("1. Select Parameters")
-    st.markdown("Choose parameters for the health score:")
     
-    # Use keys that match the parameter names for easier processing in the callback
+    # Store temporary checkbox selections in a separate dictionary
+    temp_selections = {}
     for param in ui_options:
-        st.checkbox(param, key=f"param_{param}", on_change=set_parameters)
+        temp_selections[param] = st.checkbox(
+            param, 
+            value=(param in st.session_state.confirmed_parameters)
+        )
+
+    if st.button("Set Parameters", use_container_width=True):
+        st.session_state.confirmed_parameters = [p for p, selected in temp_selections.items() if selected]
+        st.session_state.analysis_results = None # Reset results on change
 
     st.divider()
     st.header("2. Select Lakes")
@@ -458,8 +433,12 @@ with st.sidebar:
     lake_ids_in_district = sorted(filtered_lakes_by_loc['Lake_ID'].unique())
     
     if lake_ids_in_district:
-        st.selectbox("Select a Lake ID to Add", lake_ids_in_district, key="lake_selector")
-        st.button("Add Lake for Comparison", on_click=add_lake_id, use_container_width=True)
+        selected_lake_id = st.selectbox("Select a Lake ID to Add", lake_ids_in_district)
+        if st.button("Add Lake for Comparison", use_container_width=True):
+            if selected_lake_id not in st.session_state.selected_lake_ids:
+                st.session_state.selected_lake_ids.append(selected_lake_id)
+                st.session_state.selected_lake_ids.sort()
+                st.session_state.analysis_results = None # Reset results
     else: 
         st.warning("No lakes found in this district.")
 
@@ -474,17 +453,29 @@ with col1:
         marker_cluster = MarkerCluster().add_to(m)
         for _, row in filtered_lakes_by_loc.iterrows():
             folium.Marker([row['Lat'], row['Lon']], popup=f"<b>Lake ID:</b> {row['Lake_ID']}", tooltip=f"Lake ID: {row['Lake_ID']}", icon=folium.Icon(color='blue', icon='water')).add_to(marker_cluster)
-        st_folium(m, height=480, use_container_width=True)
+        st_folium(m, height=500, use_container_width=True)
 
 with col2:
     st.subheader("🔬 Lakes Selected for Analysis")
-    st.text_area(
-        "Edit Lake IDs (comma-separated)", 
-        key="lake_id_input", 
-        on_change=update_lake_ids_from_input,
+    
+    # This text area now just displays the state. The button handles adding.
+    # Manual editing is possible but less central to the workflow.
+    ids_as_text = ", ".join(map(str, st.session_state.selected_lake_ids))
+    edited_text = st.text_area(
+        "Selected Lake IDs (edit here if needed)", 
+        value=ids_as_text,
         height=50
     )
-    
+    # Sync state if text area was changed manually
+    try:
+        ids_from_box = sorted([int(x.strip()) for x in edited_text.split(",") if x.strip()]) if edited_text else []
+        if ids_from_box != st.session_state.selected_lake_ids:
+            st.session_state.selected_lake_ids = ids_from_box
+            st.session_state.analysis_results = None
+    except (ValueError, TypeError):
+        st.warning("Invalid input. Please enter only comma-separated numbers.")
+
+
     if st.session_state.confirmed_parameters:
         param_str = ", ".join(f"`{p}`" for p in st.session_state.confirmed_parameters)
         st.info(f"**Active Parameters:** {param_str}")
@@ -503,6 +494,7 @@ with col2:
                     results, calc_details = calculate_lake_health_score(selected_df, st.session_state.confirmed_parameters)
                     st.session_state.analysis_results = results
                     st.session_state.calc_details = calc_details
+                    st.session_state.pdf_buffer = None # Clear old PDF
             except Exception as e: 
                 st.error(f"A critical error occurred during analysis.")
                 st.exception(e)
@@ -514,13 +506,11 @@ with col2:
         st.dataframe(st.session_state.analysis_results[["Lake_ID", "Health Score", "Rank"]].style.format({"Health Score": "{:.3f}"}), use_container_width=True)
         st.subheader("📥 Download Center")
 
-        # The PDF generation is computationally expensive, so we only do it when the button is clicked.
         if st.button("📄 Generate Full PDF Report", use_container_width=True):
              with st.spinner("Generating PDF Report... Please wait."):
-                # We store the generated PDF in session state to allow the download button to access it.
-                st.session_state.pdf_buffer = generate_comparative_pdf_report(df_health_full[df_health_full["Lake_ID"].isin(lake_ids_to_analyze)], st.session_state.analysis_results, st.session_state.calc_details, lake_ids_to_analyze, st.session_state.confirmed_parameters)
+                pdf_buffer = generate_comparative_pdf_report(df_health_full[df_health_full["Lake_ID"].isin(lake_ids_to_analyze)], st.session_state.analysis_results, st.session_state.calc_details, lake_ids_to_analyze, st.session_state.confirmed_parameters)
+                st.session_state.pdf_buffer = pdf_buffer
         
-        # If the PDF buffer exists in the session state, show the download button.
         if 'pdf_buffer' in st.session_state and st.session_state.pdf_buffer is not None:
             st.download_button(
                 label="✅ Click to Download PDF", 
