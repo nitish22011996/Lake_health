@@ -108,8 +108,10 @@ def calculate_lake_health_score(_df, selected_ui_options, lake_ids_tuple):
     for param in params_to_process:
         props = PARAMETER_PROPERTIES[param]
         latest_values = latest_year_data[param]
-        # FIX: Fill NaN with 0.5 (neutral) to ensure calculations don't fail
-        present_value_score_result = (norm(latest_values) if props['impact'] == 'positive' else rev_norm(latest_values)).fillna(0.5)
+        
+        # FIX: Check if norm/rev_norm returns a Series before calling .fillna()
+        raw_pv_score = norm(latest_values) if props['impact'] == 'positive' else rev_norm(latest_values)
+        present_value_score_result = raw_pv_score.fillna(0.5) if isinstance(raw_pv_score, pd.Series) else raw_pv_score
         
         if param == 'HDI':
             factor_score_result = present_value_score_result
@@ -122,9 +124,15 @@ def calculate_lake_health_score(_df, selected_ui_options, lake_ids_tuple):
             slopes = trends.apply(lambda x: x.slope if not isinstance(x, tuple) else x[0])
             p_values = trends.apply(lambda x: x.pvalue if not isinstance(x, tuple) else x[3])
             
-            # FIX: Fill NaNs with 0.5 (neutral) for each component
-            slope_norm_result = (norm(slopes) if props['impact'] == 'positive' else rev_norm(slopes)).fillna(0.5)
-            p_value_norm_result = (1.0 - norm(p_values)).fillna(0.5)
+            # FIX: Check for Series type on all normalization results
+            raw_slope_score = norm(slopes) if props['impact'] == 'positive' else rev_norm(slopes)
+            slope_norm_result = raw_slope_score.fillna(0.5) if isinstance(raw_slope_score, pd.Series) else raw_slope_score
+
+            raw_p_value_score = norm(p_values)
+            if isinstance(raw_p_value_score, pd.Series):
+                p_value_norm_result = (1.0 - raw_p_value_score).fillna(0.5)
+            else: # It's a float, so no fillna needed
+                p_value_norm_result = 1.0 - raw_p_value_score
             
             factor_score_result = (present_value_score_result + slope_norm_result + p_value_norm_result) / 3.0
             
@@ -137,7 +145,7 @@ def calculate_lake_health_score(_df, selected_ui_options, lake_ids_tuple):
         
         total_score += final_weights[param] * factor_score_result
         
-    latest_year_data['Health Score'] = total_score.fillna(0.0) # Final safety net
+    latest_year_data['Health Score'] = total_score.fillna(0.0)
     
     latest_year_data['Rank'] = latest_year_data['Health Score'].rank(
         ascending=False, method='min', na_option='bottom'
@@ -339,25 +347,14 @@ def generate_ai_insight(prompt):
 
 # --- PDF GENERATION USING REPORTLAB'S BaseDocTemplate FOR ROBUST PAGE NUMBERING ---
 
-class PDFReportTemplate(BaseDocTemplate):
-    """A template for PDF reports with page numbering."""
-    def __init__(self, filename, **kwargs):
-        self.allowSplitting = 0
-        BaseDocTemplate.__init__(self, filename, **kwargs)
-        template = PageTemplate(id='main', frames=[Frame(self.leftMargin, self.bottomMargin, self.width, self.height)], onPage=self._page_number_handler)
-        self.addPageTemplates([template])
-
-    def _page_number_handler(self, canvas, doc):
-        """Handles drawing the page number on each page."""
-        canvas.saveState()
-        canvas.setFont('Helvetica', 9)
-        canvas.drawRightString(A4[0] - 20, 20, f"Page {doc.page} of {self.page_count}")
-        canvas.restoreState()
-
-    def afterFlowable(self, flowable):
-        """Keeps track of the page count."""
-        if hasattr(flowable, 'ismark'):
-            self.page_count = self.page
+def _page_number_handler(canvas, doc):
+    """Global handler for drawing the page number on each page."""
+    canvas.saveState()
+    canvas.setFont('Helvetica', 9)
+    # The page_count is attached to the document object itself
+    page_count = getattr(doc, 'page_count', 0)
+    canvas.drawRightString(A4[0] - 20, 20, f"Page {doc.page} of {page_count}")
+    canvas.restoreState()
 
 def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selected_ui_options):
     buffer = BytesIO()
@@ -368,7 +365,6 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
     lake_ids = sorted(results['Lake_ID'].unique())
     
     if not lake_ids:
-        # Create a simple error PDF if no data
         c = canvas.Canvas(buffer, pagesize=A4)
         c.drawString(100, A4[1] - 100, "Error: No data available for the selected lakes to generate a report.")
         c.save()
@@ -382,10 +378,9 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
     subtitle_style = ParagraphStyle(name='Subtitle', parent=styles['Normal'], alignment=1, fontSize=9, textColor=colors.grey, spaceAfter=12)
     justified_style = ParagraphStyle(name='Justified', parent=styles['Normal'], alignment=4, fontSize=10, leading=14)
 
-    # Build the story (the list of flowables for the PDF)
     story = []
-
-    # --- Title Page ---
+    
+    # --- Title Page Contents ---
     story.append(Paragraph("Lake Health Report", title_style))
     story.append(Paragraph("<i>Click bookmarks in your PDF viewer to navigate.</i>", subtitle_style))
     
@@ -407,15 +402,14 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
     # --- Breakdown Section ---
     story.append(Paragraph("Health Score Calculation Breakdown", header_style))
     for lake_id in lake_ids:
-        if lake_id not in calc_details: continue
         story.append(Paragraph(f"<b>Breakdown for Lake {lake_id}</b>", styles['h3']))
         table_data = [['Parameter', 'Raw Val', 'Norm Pres.', 'Norm Trend', 'Norm P-Val', 'Factor Score', 'Weight', 'Contrib.']]
         for param, details in sorted(calc_details[lake_id].items()):
             table_data.append([
-                param[:18], f"{details.get('Raw Value', ''):.2f}", f"{details.get('Norm Pres.', ''):.3f}",
-                f"{details.get('Norm Trend', 'N/A')}" if isinstance(details.get('Norm Trend'), str) else f"{details.get('Norm Trend', ''):.3f}",
-                f"{details.get('Norm P-Val', 'N/A')}" if isinstance(details.get('Norm P-Val'), str) else f"{details.get('Norm P-Val', ''):.3f}",
-                f"{details.get('Factor Score', ''):.3f}", f"{details.get('Weight', ''):.3f}", f"{details.get('Contribution', ''):.3f}"
+                param[:18], f"{details.get('Raw Value', 0):.2f}", f"{details.get('Norm Pres.', 0):.3f}",
+                f"{details.get('Norm Trend', 'N/A')}" if isinstance(details.get('Norm Trend'), str) else f"{details.get('Norm Trend', 0):.3f}",
+                f"{details.get('Norm P-Val', 'N/A')}" if isinstance(details.get('Norm P-Val'), str) else f"{details.get('Norm P-Val', 0):.3f}",
+                f"{details.get('Factor Score', 0):.3f}", f"{details.get('Weight', 0):.3f}", f"{details.get('Contribution', 0):.3f}"
             ])
         table = Table(table_data, colWidths=[110, 60, 60, 60, 60, 60, 50, 60])
         table.setStyle(TableStyle([
@@ -432,8 +426,11 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
     plots = generate_grouped_plots_by_metric(df, tuple(lake_ids), params_to_plot)
     for title, buf, _ in plots:
         story.append(Paragraph(title, styles['h3']))
-        story.append(ImageReader(buf))
-        
+        img = ImageReader(buf)
+        img_width, img_height = img.getSize()
+        aspect = img_height / float(img_width)
+        story.append(Image(buf, width=A4[0]*0.7, height=(A4[0]*0.7 * aspect)))
+
     # --- Case Study Section ---
     story.append(Paragraph("Case Study Analysis", header_style))
     case_study_figures = [
@@ -446,20 +443,27 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
         if fig_data is None or fig_data[1] is None: continue
         title, buf, _ = fig_data
         story.append(Paragraph(title, styles['h3']))
-        story.append(ImageReader(buf))
+        img = ImageReader(buf)
+        img_width, img_height = img.getSize()
+        aspect = img_height / float(img_width)
+        story.append(Image(buf, width=A4[0]*0.7, height=(A4[0]*0.7 * aspect)))
         data_summary = f"Analysis of lakes {lake_ids} with parameters {selected_ui_options}."
         ai_prompt = build_figure_specific_ai_prompt(title, data_summary)
         ai_narrative = generate_ai_insight(ai_prompt).replace('\n', '<br/>')
         story.append(Paragraph(ai_narrative, justified_style))
         
-    # --- Build the PDF ---
-    # Two-pass build: first to count pages, second to build with numbers.
-    doc = PDFReportTemplate(buffer)
+    # --- Build the PDF using the robust two-pass method ---
+    doc = BaseDocTemplate(buffer, pagesize=A4)
+    frame = Frame(doc.leftMargin, doc.bottomMargin, doc.width, doc.height, id='normal')
+    template = PageTemplate(id='main', frames=[frame], onPage=_page_number_handler)
+    doc.addPageTemplates([template])
+
+    # First pass to count the pages
     doc.build(story, onFirstPage=lambda c, d: setattr(doc, 'page_count', 1),
-              onLaterPages=lambda c, d: setattr(doc, 'page_count', doc.page))
+              onLaterPages=lambda c, d: setattr(doc, 'page_count', d.page))
     
-    doc = PDFReportTemplate(buffer)
-    doc.build(story) # This time page_count is set correctly
+    # Second pass to build the document with the correct total page count
+    doc.build(story)
     
     buffer.seek(0)
     return buffer
@@ -559,6 +563,7 @@ with col2:
                         if results.empty:
                             st.error("Analysis could not be completed for the selected lakes.")
                         else:
+                            from reportlab.platypus import Image # Import Image here
                             pdf_buffer = generate_comparative_pdf_report(selected_df, results, calc_details, valid_lakes, st.session_state.confirmed_parameters)
                             st.session_state.analysis_results = results
                             st.session_state.pdf_buffer = pdf_buffer
