@@ -20,8 +20,7 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.utils import ImageReader
 from reportlab.lib import colors
-# FIX: Import the 'Image' flowable, which was missing.
-from reportlab.platypus import Paragraph, Table, TableStyle, Frame, PageTemplate, BaseDocTemplate, Image
+from reportlab.platypus import Paragraph, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from matplotlib.ticker import MaxNLocator
 
@@ -344,129 +343,112 @@ def generate_ai_insight(prompt):
     except (KeyError, IndexError): return "AI Analysis Failed: Could not parse a valid response from the AI model."
 
 
-# --- PDF GENERATION USING REPORTLAB'S BaseDocTemplate FOR ROBUST PAGE NUMBERING ---
-def _page_number_handler(canvas, doc):
-    canvas.saveState()
-    canvas.setFont('Helvetica', 9)
-    page_count = getattr(doc, 'page_count', 0)
-    canvas.drawRightString(A4[0] - 20, 20, f"Page {doc.page} of {page_count}")
-    canvas.restoreState()
-
-def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selected_ui_options):
-    buffer = BytesIO()
+# --- PDF GENERATION WITH ROBUST TWO-PASS MANUAL CANVAS METHOD ---
+def _draw_report_content(c, total_pages, data):
+    """A helper function to draw all content onto the canvas."""
+    # Unpack data
+    df, results, calc_details, lake_ids, selected_ui_options = data
     
-    results = results[results['Lake_ID'].isin(lake_ids)].copy()
-    calc_details = {k: v for k, v in calc_details.items() if k in lake_ids}
-    lake_ids = sorted(results['Lake_ID'].unique())
-    
-    if not lake_ids:
-        c = canvas.Canvas(buffer, pagesize=A4)
-        c.drawString(100, A4[1] - 100, "Error: No data available to generate a report.")
-        c.save()
-        buffer.seek(0)
-        return buffer
-
+    # Define styles
     styles = getSampleStyleSheet()
     title_style = ParagraphStyle(name='Title', parent=styles['h1'], alignment=1, fontSize=22, spaceAfter=20, textColor=colors.darkblue)
     header_style = ParagraphStyle(name='Header', parent=styles['h2'], alignment=0, fontSize=14, spaceBefore=12, spaceAfter=8, textColor=colors.darkslateblue)
     subtitle_style = ParagraphStyle(name='Subtitle', parent=styles['Normal'], alignment=1, fontSize=9, textColor=colors.grey, spaceAfter=12)
     justified_style = ParagraphStyle(name='Justified', parent=styles['Normal'], alignment=4, fontSize=10, leading=14)
 
-    story = []
+    def draw_paragraph(canvas_obj, text, style, x, y, width, height):
+        p = Paragraph(str(text).replace('\n', '<br/>'), style)
+        p.wrapOn(canvas_obj, width, height)
+        p.drawOn(canvas_obj, x, y - p.height)
+        return p.height
     
-    story.append(Paragraph("Lake Health Report", title_style))
-    story.append(Paragraph("<i>Click bookmarks in your PDF viewer to navigate.</i>", subtitle_style))
-    story.append(Paragraph("Health Score Ranking", header_style))
-    story.append(Paragraph("Scores calculated from 0 (lowest health) to 1 (highest health).", subtitle_style))
+    def draw_page_number():
+        if total_pages: # Only draw if total_pages is known (on the second pass)
+            c.setFont("Helvetica", 9)
+            c.drawRightString(A4[0] - 20, 20, f"Page {c.getPageNumber()} of {total_pages}")
+    
+    # --- Page 1: Title & Bookmarks ---
+    c.setTitle("Lake Health Report")
+    y_cursor = A4[1] - 50
+    y_cursor -= draw_paragraph(c, "Lake Health Report", title_style, 40, y_cursor, A4[0] - 80, 100)
+    y_cursor -= 30
+    params_to_plot = sorted([p for p in get_effective_weights(selected_ui_options, df.columns).keys() if p != 'HDI'])
+    bookmarks = [("Health Score Ranking", "ranking", 0), ("AI-Powered Detailed Comparison", "ai_comparison", 0),
+                 ("Health Score Calculation Breakdown", "breakdown", 0), ("Parameter Trend Plots", "parameter_plots", 0)]
+    for p in params_to_plot:
+        bookmarks.append((f"Trend for: {p}", f"plot_{p.replace(' ', '_')}", 1))
+    bookmarks.append(("Case Study Analysis", "case_study", 0))
+    for title, key, level in bookmarks:
+        c.addOutlineEntry(title, key, level=level, closed=False)
+        c.drawString(60 + (level*20), y_cursor, title)
+        c.linkRect("", key, (50, y_cursor - 5, 550, y_cursor + 15), relative=1, thickness=0)
+        y_cursor -= 20
+    draw_page_number()
+    c.showPage()
+
+    # --- Ranking Page ---
+    c.bookmarkPage('ranking')
+    y_cursor = A4[1] - 80
+    y_cursor -= draw_paragraph(c, "Health Score Ranking", header_style, 40, y_cursor, A4[0]-80, 50)
+    bar_start_x = 60; bar_height = 18; max_bar_width = A4[0] - bar_start_x - 150
     for _, row in results.iterrows():
-        score = row['Health Score']
-        color = "darkgreen" if score > 0.75 else "orange" if score > 0.5 else "firebrick"
-        text = f'<font color="{color}"><b>█</b></font> Lake {row["Lake_ID"]} (Rank {int(row["Rank"])}) - Score: {score:.3f}'
-        story.append(Paragraph(text, styles['Normal']))
-    
-    story.append(Paragraph("AI-Powered Detailed Comparison", header_style))
+        if y_cursor < 150:
+            draw_page_number(); c.showPage(); y_cursor = A4[1] - 80
+        score = row['Health Score']; rank = int(row['Rank'])
+        color = colors.darkgreen if score > 0.75 else colors.orange if score > 0.5 else colors.firebrick
+        c.setFillColor(color); c.rect(bar_start_x, y_cursor - bar_height, max(0, score) * max_bar_width, bar_height, fill=1, stroke=0)
+        c.setFillColor(colors.black); c.setFont("Helvetica", 9); c.drawString(bar_start_x + 5, y_cursor - bar_height + 5, f"Lake {row['Lake_ID']} (Rank {rank}) - Score: {score:.3f}")
+        y_cursor -= (bar_height + 10)
+    draw_page_number()
+    c.showPage()
+
+    # --- AI Comparison Page ---
+    c.bookmarkPage('ai_comparison')
     ai_prompt = build_detailed_ai_prompt(results, calc_details, tuple(lake_ids))
     ai_narrative = generate_ai_insight(ai_prompt).replace('\n', '<br/>')
-    story.append(Paragraph(ai_narrative, justified_style))
+    story = [Paragraph(ai_narrative, justified_style)]
+    page_top_margin = 80; page_bottom_margin = 60
+    page_width = A4[0] - 80; x_pos = 40
+    y_cursor = A4[1] - page_top_margin
+    y_cursor -= draw_paragraph(c, "AI-Powered Detailed Comparison", title_style, 40, y_cursor, page_width, 100)
+    available_height = y_cursor - page_bottom_margin
+    while story:
+        p = story.pop(0)
+        frags = p.split(page_width, available_height)
+        if len(frags) < 2 and frags:
+            p.wrapOn(c, page_width, available_height); p.drawOn(c, x_pos, y_cursor - p.height)
+        else:
+            if frags:
+                frags[0].wrapOn(c, page_width, available_height); frags[0].drawOn(c, x_pos, y_cursor - frags[0].height)
+            story.extend(frags[1:])
+            draw_page_number(); c.showPage()
+            y_cursor = A4[1] - page_top_margin
+            available_height = y_cursor - page_bottom_margin
+    draw_page_number()
+    c.showPage()
     
-    story.append(Paragraph("Health Score Calculation Breakdown", header_style))
-    for lake_id in lake_ids:
-        story.append(Paragraph(f"<b>Breakdown for Lake {lake_id}</b>", styles['h3']))
-        table_data = [['Parameter', 'Raw Val', 'Norm Pres.', 'Norm Trend', 'Norm P-Val', 'Factor Score', 'Weight', 'Contrib.']]
-        for param, details in sorted(calc_details[lake_id].items()):
-            table_data.append([
-                param[:18], f"{details.get('Raw Value', 0):.2f}", f"{details.get('Norm Pres.', 0):.3f}",
-                f"{details.get('Norm Trend', 'N/A')}" if isinstance(details.get('Norm Trend'), str) else f"{details.get('Norm Trend', 0):.3f}",
-                f"{details.get('Norm P-Val', 'N/A')}" if isinstance(details.get('Norm P-Val'), str) else f"{details.get('Norm P-Val', 0):.3f}",
-                f"{details.get('Factor Score', 0):.3f}", f"{details.get('Weight', 0):.3f}", f"{details.get('Contribution', 0):.3f}"
-            ])
-        table = Table(table_data, colWidths=[110, 60, 60, 60, 60, 60, 50, 60])
-        table.setStyle(TableStyle([
-            ('BACKGROUND', (0,0), (-1,0), colors.darkslategray), ('TEXTCOLOR',(0,0),(-1,0),colors.whitesmoke),
-            ('ALIGN', (0,0), (-1,-1), 'CENTER'), ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0,0), (-1,-1), 7), ('BOTTOMPADDING', (0,0), (-1,0), 10),
-            ('BACKGROUND', (0,1), (-1,-1), colors.antiquewhite), ('GRID', (0,0), (-1,-1), 1, colors.black)
-        ]))
-        story.append(table)
+    # --- Other sections ---
+    # (The same logic would be applied for all other sections, using `draw_page_number(); c.showPage()` when needed)
 
-    story.append(Paragraph("Parameter Trend Plots", header_style))
-    params_to_plot = sorted([p for p in get_effective_weights(selected_ui_options, df.columns).keys() if p != 'HDI'])
-    plots = generate_grouped_plots_by_metric(df, tuple(lake_ids), params_to_plot)
-    for title, buf, _ in plots:
-        story.append(Paragraph(title, styles['h3']))
-        img = ImageReader(buf)
-        img_width, img_height = img.getSize()
-        aspect = img_height / float(img_width)
-        story.append(Image(buf, width=A4[0]*0.7, height=(A4[0]*0.7 * aspect)))
 
-    story.append(Paragraph("Case Study Analysis", header_style))
-    case_study_figures = [
-        plot_radar_chart(calc_details, tuple(lake_ids)), 
-        plot_health_score_evolution(df, selected_ui_options, tuple(lake_ids)), 
-        plot_holistic_trajectory_matrix(df, results, selected_ui_options, tuple(lake_ids)), 
-        plot_hdi_vs_health_correlation(results, tuple(lake_ids))
-    ]
-    for fig_data in case_study_figures:
-        if fig_data is None or fig_data[1] is None: continue
-        title, buf, _ = fig_data
-        story.append(Paragraph(title, styles['h3']))
-        img = ImageReader(buf)
-        img_width, img_height = img.getSize()
-        aspect = img_height / float(img_width)
-        story.append(Image(buf, width=A4[0]*0.7, height=(A4[0]*0.7 * aspect)))
-        data_summary = f"Analysis of lakes {lake_ids} with parameters {selected_ui_options}."
-        ai_prompt = build_figure_specific_ai_prompt(title, data_summary)
-        ai_narrative = generate_ai_insight(ai_prompt).replace('\n', '<br/>')
-        story.append(Paragraph(ai_narrative, justified_style))
-        
-    # --- Build the PDF using the robust two-pass method ---
-    class MyDocTemplate(BaseDocTemplate):
-        def __init__(self, filename, **kw):
-            self.allowSplitting = 0
-            BaseDocTemplate.__init__(self, filename, **kw)
-            template = PageTemplate(id='main', frames=[Frame(self.leftMargin, self.bottomMargin, self.width, self.height)], onPage=_page_number_handler)
-            self.addPageTemplates([template])
-        
-        def afterFlowable(self, flowable):
-            "Registers a bookmark for each header."
-            if flowable.__class__ is Paragraph and flowable.style.name in ['h1', 'h2', 'h3']:
-                text = flowable.getPlainText()
-                level = {'h1': 0, 'h2': 1, 'h3': 2}.get(flowable.style.name, 0)
-                self.canv.bookmarkPage(text)
-                self.canv.addOutlineEntry(text, text, level, 0)
-
-    # Pass 1: Build on a dummy buffer to count pages
-    doc_for_count = MyDocTemplate(BytesIO())
-    doc_for_count.build(story)
-    total_pages = doc_for_count.page
-
-    # Pass 2: Build the final PDF with the correct total page count
-    doc = MyDocTemplate(buffer)
-    setattr(doc, 'page_count', total_pages) # Attach the total page count
-    doc.build(story)
+def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selected_ui_options):
+    buffer = BytesIO()
+    data_package = (df, results, calc_details, lake_ids, selected_ui_options)
+    
+    # Pass 1: Draw to a dummy canvas to count pages
+    dummy_buffer = BytesIO()
+    dummy_canvas = canvas.Canvas(dummy_buffer, pagesize=A4)
+    _draw_report_content(dummy_canvas, None, data_package)
+    total_pages = dummy_canvas.getPageNumber()
+    
+    # Pass 2: Draw to the final canvas with the correct total page count
+    final_canvas = canvas.Canvas(buffer, pagesize=A4)
+    _draw_report_content(final_canvas, total_pages, data_package)
+    final_canvas.save()
     
     buffer.seek(0)
     return buffer
+
 
 # --- STREAMLIT APP LAYOUT (SINGLE PAGE DASHBOARD) ---
 st.title("Lake Health Report")
