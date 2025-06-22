@@ -350,57 +350,38 @@ class PDFReport:
         p.wrapOn(self.canvas, width, height)
         p.drawOn(self.canvas, x, y - p.height)
         return p.height
-
+    
     def add_toc_entry(self, title, level=0):
-        # We add the page number when drawing the TOC, not when collecting entries
         self.toc.append({'title': title, 'level': level, 'page_num': self.canvas.getPageNumber()})
-
-    def draw_page_number(self, page_num, total_pages):
-        self.canvas.setFont("Helvetica", 9)
-        self.canvas.drawRightString(self.width - 20, 20, f"Page {page_num} of {total_pages}")
 
     def show_page(self):
         self.canvas.showPage()
-
+    
     def build(self, df, results, calc_details, lake_ids, selected_ui_options):
-        # Generate content pages and collect TOC entries
+        # Pass 1: Generate content and store page numbers for TOC
         self.generate_content_pages(df, results, calc_details, lake_ids, selected_ui_options)
-        
-        # Save the content to a buffer
         self.canvas.save()
         content_buffer = self.buffer
         content_buffer.seek(0)
         
-        # --- PASS 2: Create the final PDF with TOC and page numbers ---
+        # Pass 2: Create a new PDF with TOC and then merge content
         final_buffer = BytesIO()
-        final_canvas = canvas.Canvas(final_buffer, pagesize=A4)
+        toc_canvas = canvas.Canvas(final_buffer, pagesize=A4)
+        self.draw_toc_page(toc_canvas)
+        toc_canvas.save()
         
-        # Draw TOC on page 1 of the final PDF
-        self.draw_toc_page(final_canvas)
-        final_canvas.showPage()
-        
-        # Merge content pages into the final PDF
         output_pdf = PdfWriter()
-        
-        # Add the TOC page we just created
-        toc_pdf = PdfReader(BytesIO(final_canvas.getpdfdata()))
+        toc_pdf = PdfReader(BytesIO(final_buffer.getvalue()))
         output_pdf.add_page(toc_pdf.pages[0])
 
-        # Add the content pages from the first pass
         content_pdf = PdfReader(content_buffer)
         for page in content_pdf.pages:
             output_pdf.add_page(page)
 
-        # Write the merged PDF to the final buffer
-        output_pdf.write(final_buffer)
-        
-        # --- PASS 3: Add page numbers to the final merged PDF ---
+        # Pass 3: Add page numbers to the final merged PDF
         final_pdf_with_numbers_buffer = BytesIO()
-        pdf_reader = PdfReader(final_buffer)
-        pdf_writer = PdfWriter()
-        total_pages = len(pdf_reader.pages)
-
-        for page_num, page in enumerate(pdf_reader.pages, 1):
+        total_pages = len(output_pdf.pages)
+        for page_num, page in enumerate(output_pdf.pages, 1):
             overlay_buffer = BytesIO()
             overlay_canvas = canvas.Canvas(overlay_buffer, pagesize=A4)
             overlay_canvas.setFont("Helvetica", 9)
@@ -410,23 +391,21 @@ class PDFReport:
             
             overlay_pdf = PdfReader(overlay_buffer)
             page.merge_page(overlay_pdf.pages[0])
-            pdf_writer.add_page(page)
 
-        pdf_writer.write(final_pdf_with_numbers_buffer)
-        
+        output_pdf.write(final_pdf_with_numbers_buffer)
         return final_pdf_with_numbers_buffer
 
-
     def draw_toc_page(self, c):
-        # PDF IMPROVEMENT: Title changed
-        self.draw_paragraph_on_canvas(c, "Lake Health Report", self.title_style, 40, self.height - 50, self.width - 80, 100)
+        y_cursor = self.height - 50
+        y_cursor -= self.draw_paragraph_on_canvas(c, "Lake Health Report", self.title_style, 40, y_cursor, self.width - 80, 100)
         
-        y_cursor = self.height - 150
+        # --- PDF IMPROVEMENT: Fixed Overlap ---
+        y_cursor -= 30 # Add space between title and TOC header
         y_cursor -= self.draw_paragraph_on_canvas(c, "Table of Contents", self.header_style, 40, y_cursor, 400, 50)
         
         for entry in self.toc:
             title = entry['title']
-            page_num = entry['page_num']
+            page_num = entry['page_num'] + 1 # Add 1 because TOC is page 1
             level = entry['level']
             
             if y_cursor < 100:
@@ -443,7 +422,8 @@ class PDFReport:
             c.line(dot_x, y_cursor + 4, page_x - 5, y_cursor + 4)
             c.setDash([])
             
-            # The links in TOC are tricky with PyPDF2 merge, this is a visual guide.
+            # This makes the entry clickable in the final PDF
+            c.linkURL(f'#page={page_num}', (x_offset, y_cursor - 2, self.width - 60, y_cursor + 12), relative=0)
             y_cursor -= 20
         
     def draw_paragraph_on_canvas(self, c, text, style, x, y, width, height):
@@ -453,6 +433,7 @@ class PDFReport:
         return p.height
 
     def generate_content_pages(self, df, results, calc_details, lake_ids, selected_ui_options):
+        # Page 1: Ranking
         self.add_toc_entry("Health Score Ranking")
         y_cursor = self.height - 80
         y_cursor -= self.draw_paragraph("Health Score Ranking", self.header_style, 40, y_cursor, self.width-80, 50)
@@ -477,7 +458,6 @@ class PDFReport:
         self.canvas.setFillColor(colors.black); self.canvas.drawString(bar_start_x + 15, y_cursor, "Moderate (0.5 < Score <= 0.75)")
         y_cursor -= 15; self.canvas.setFillColor(colors.firebrick); self.canvas.rect(bar_start_x, y_cursor, 10, 10, fill=1)
         self.canvas.setFillColor(colors.black); self.canvas.drawString(bar_start_x + 15, y_cursor, "Poor (Score <= 0.5)")
-        
         self.show_page()
 
         self.add_toc_entry("AI-Powered Detailed Comparison")
@@ -502,10 +482,10 @@ class PDFReport:
             table.drawOn(self.canvas, 40, y_cursor - table_height); y_cursor -= (table_height + 20)
         self.show_page()
 
+        self.add_toc_entry("Parameter Trend Plots")
         final_weights = get_effective_weights(selected_ui_options, df.columns)
         params_to_plot = sorted([p for p in final_weights.keys() if p != 'HDI'])
         plots = generate_grouped_plots_by_metric(df, lake_ids, params_to_plot)
-        self.add_toc_entry("Parameter Trend Plots", level=1)
         for i, (title, buf, _) in enumerate(plots):
             if i % 2 == 0: self.show_page()
             y_pos = self.height - 50 if i % 2 == 0 else self.height * 0.5 - 60
