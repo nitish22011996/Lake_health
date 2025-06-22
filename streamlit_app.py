@@ -346,6 +346,10 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
     y_cursor = A4[1] - 50
     draw_paragraph(c, "Health Score Calculation Breakdown", title_style, 40, y_cursor, A4[0]-80, 100); y_cursor -= 80
     for lake_id in lake_ids:
+        # --- CRITICAL FIX for KeyError ---
+        # Ensure we don't try to access a lake_id that's not in the current analysis
+        if lake_id not in calc_details:
+            continue
         table_data = [['Parameter', 'Raw Val', 'Norm Pres.', 'Norm Trend', 'Norm P-Val', 'Factor Score', 'Weight', 'Contrib.']]
         for param, details in sorted(calc_details[lake_id].items()):
              table_data.append([param[:18], f"{details.get('Raw Value', ''):.2f}", f"{details.get('Norm Pres.', ''):.3f}", f"{details.get('Norm Trend', 'N/A')}" if isinstance(details.get('Norm Trend'), str) else f"{details.get('Norm Trend', ''):.3f}", f"{details.get('Norm P-Val', 'N/A')}" if isinstance(details.get('Norm P-Val'), str) else f"{details.get('Norm P-Val', ''):.3f}", f"{details.get('Factor Score', ''):.3f}", f"{details.get('Weight', ''):.3f}", f"{details.get('Contribution', ''):.3f}",])
@@ -415,12 +419,17 @@ col_controls, col_main = st.columns([1, 2.5])
 
 # --- COLUMN 1: CONTROLS (Static and Always Visible) ---
 with col_controls:
-    st.header("⚙️ Control Panel")
-    
-    # --- 1. Parameter Selection using Form for Stability ---
+    st.subheader("1. Select Parameters")
     with st.form(key='parameter_form'):
-        st.subheader("1. Select Parameters")
-        temp_selections = {param: st.checkbox(param, value=(param in st.session_state.confirmed_parameters)) for param in ui_options}
+        # --- UI IMPROVEMENT: Two-column checkboxes ---
+        cb_cols = st.columns(2)
+        temp_selections = {}
+        for i, param in enumerate(ui_options):
+            with cb_cols[i % 2]:
+                temp_selections[param] = st.checkbox(
+                    param, 
+                    value=(param in st.session_state.confirmed_parameters)
+                )
         
         if st.form_submit_button("Set Parameters", use_container_width=True):
             st.session_state.confirmed_parameters = [p for p, selected in temp_selections.items() if selected]
@@ -434,7 +443,6 @@ with col_controls:
 
     st.markdown("---")
 
-    # --- 2. Lake Selection ---
     st.subheader("2. Select Lakes")
     sorted_states = sorted(df_location['State'].unique())
     selected_state = st.selectbox("Filter by State:", sorted_states, key="state_selector")
@@ -444,9 +452,8 @@ with col_controls:
     
     available_lakes = df_location[(df_location['State'] == selected_state) & (df_location['District'] == selected_district)]['Lake_ID'].unique()
     
-    # Dropdown to add a lake
     if len(available_lakes) > 0:
-        lake_to_add = st.selectbox("Select a lake to add:", sorted(available_lakes))
+        lake_to_add = st.selectbox("Select a lake from list:", sorted(available_lakes))
         if st.button("Add Lake for Comparison", use_container_width=True):
             try:
                 current_ids = set(int(x.strip()) for x in st.session_state.lake_id_text.split(',') if x.strip())
@@ -457,10 +464,8 @@ with col_controls:
             except (ValueError, TypeError):
                 st.error("Invalid format in the text box. Please use comma-separated numbers.")
     
-    # Manual entry box
     st.text_area("Selected Lakes for Analysis (comma-separated):", key="lake_id_text")
 
-    # Parse the text area to get the final list of lakes
     try:
         lake_ids_to_analyze = sorted([int(x.strip()) for x in st.session_state.lake_id_text.split(',') if x.strip()])
     except (ValueError, TypeError):
@@ -469,7 +474,6 @@ with col_controls:
 
     st.markdown("---")
 
-    # --- 3. Analysis Button ---
     st.subheader("3. Run Analysis")
     is_disabled = not lake_ids_to_analyze or not st.session_state.confirmed_parameters
     if st.button("🚀 Analyze Selected Lakes", disabled=is_disabled, use_container_width=True, type="primary"):
@@ -481,10 +485,11 @@ with col_controls:
                     st.session_state.analysis_complete = False
                 else:
                     results, calc_details = calculate_lake_health_score(selected_df, st.session_state.confirmed_parameters)
-                    pdf_buffer = generate_comparative_pdf_report(df_health_full, results, calc_details, lake_ids_to_analyze, st.session_state.confirmed_parameters)
+                    
+                    # Pass the filtered selected_df to the PDF generator to prevent KeyError
+                    pdf_buffer = generate_comparative_pdf_report(selected_df, results, calc_details, lake_ids_to_analyze, st.session_state.confirmed_parameters)
                     
                     st.session_state.analysis_results = results
-                    st.session_state.calc_details = calc_details
                     st.session_state.pdf_buffer = pdf_buffer
                     st.session_state.analysis_complete = True
                     st.success("Analysis complete! View results and downloads. →")
