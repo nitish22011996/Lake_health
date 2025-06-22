@@ -412,9 +412,9 @@ if 'confirmed_parameters' not in st.session_state: st.session_state.confirmed_pa
 if 'lake_id_text' not in st.session_state: st.session_state.lake_id_text = ""
 
 # --- NEW 3-COLUMN LAYOUT ---
-col1, col2, col3 = st.columns([1.2, 1.5, 1.5])
+col1, col2, col3 = st.columns([1.2, 1.5, 2.0])
 
-# --- COLUMN 1: CONTROLS ---
+# --- COLUMN 1: Parameter Selection ---
 with col1:
     st.subheader("1. Select Parameters")
     with st.form(key='parameter_form'):
@@ -430,11 +430,11 @@ with col1:
             st.rerun()
 
     if st.session_state.confirmed_parameters:
-        st.info(f"Active: {', '.join(f'`{p}`' for p in st.session_state.confirmed_parameters)}")
+        st.info(f"**Active Parameters:** {', '.join(f'`{p}`' for p in st.session_state.confirmed_parameters)}")
 
-    st.markdown("---")
+# --- COLUMN 2: Lake Selection and Analysis ---
+with col2:
     st.subheader("2. Select Lakes")
-    
     sorted_states = sorted(df_location['State'].unique())
     selected_state = st.selectbox("Filter by State:", sorted_states)
     
@@ -484,9 +484,9 @@ with col1:
                 st.exception(e)
                 st.session_state.analysis_complete = False
 
-# --- COLUMN 2: MAP ---
-with col2:
-    st.subheader(f"📍 Map of Lakes in {selected_district}")
+# --- COLUMN 3: MAP & RESULTS ---
+with col3:
+    st.subheader(f"📍 Map & Results")
     filtered_lakes_by_loc = df_location[(df_location['State'] == selected_state) & (df_location['District'] == selected_district)]
     if not filtered_lakes_by_loc.empty:
         map_center = [filtered_lakes_by_loc['Lat'].mean(), filtered_lakes_by_loc['Lon'].mean()]
@@ -500,14 +500,12 @@ with col2:
                 tooltip=f"Lake ID: {row['Lake_ID']}",
                 icon=folium.Icon(color='green' if is_selected else 'blue', icon='water')
             ).add_to(marker_cluster)
-        st_folium(m, height=550, use_container_width=True)
+        st_folium(m, height=250, use_container_width=True)
 
-# --- COLUMN 3: RESULTS & DOWNLOADS ---
-with col3:
-    st.subheader("📊 Analysis & Downloads")
+    st.markdown("---")
+
     if st.session_state.analysis_complete:
-        st.dataframe(st.session_state.analysis_results[["Lake_ID", "Health Score", "Rank"]].style.format({"Health Score": "{:.3f}"}), height=300, use_container_width=True)
-        st.markdown("---")
+        st.dataframe(st.session_state.analysis_results[["Lake_ID", "Health Score", "Rank"]].style.format({"Health Score": "{:.3f}"}), use_container_width=True)
         
         dl_col1, dl_col2 = st.columns(2)
         with dl_col1:
