@@ -88,7 +88,6 @@ def get_effective_weights(selected_ui_options, all_df_columns):
         if param != "Land Cover": effective_weights[param] = w_main
     return effective_weights
 
-# FIX 1: Add lake_ids_tuple to the function signature to ensure the cache is unique per run.
 @st.cache_data
 def calculate_lake_health_score(_df, selected_ui_options, lake_ids_tuple):
     df = _df.copy()
@@ -136,7 +135,6 @@ def calculate_lake_health_score(_df, selected_ui_options, lake_ids_tuple):
         ascending=False, method='min', na_option='bottom'
     ).fillna(0).astype(int)
     
-    # FIX 2: Sort by Rank AND then reset the index to get a clean 0, 1, 2, ... sequence.
     final_results = latest_year_data.reset_index().sort_values('Rank').reset_index(drop=True)
     
     return final_results, calculation_details
@@ -150,7 +148,6 @@ def calculate_historical_scores(_df_full, selected_ui_options, lake_ids_tuple):
     for year in years:
         df_subset = df_full[df_full['Year'] <= year]
         if not df_subset.empty:
-            # Pass tuple of current lakes in subset to ensure correct caching
             current_lakes_tuple = tuple(sorted(df_subset['Lake_ID'].unique()))
             results, _ = calculate_lake_health_score(df_subset, selected_ui_options, current_lakes_tuple)
             if not results.empty:
@@ -342,21 +339,23 @@ class NumberedCanvas(canvas.Canvas):
         self._startPage()
 
     def save(self):
-        # FIX: The last page's state needs to be captured before the loop starts
-        self.showPage()
-        
+        """
+        FIX: This is the robust method for adding page numbers.
+        It iterates through the saved page states and redraws each page
+        with the page number, using the parent class's methods to avoid
+        state corruption.
+        """
         num_pages = len(self._saved_page_states)
-        for i, state in enumerate(self._saved_page_states):
+        for state in self._saved_page_states:
             self.__dict__.update(state)
-            # The final page is blank, so we subtract 1 from the total page count
-            if i < (num_pages - 1):
-                self.draw_page_number(num_pages - 1)
+            self.draw_page_number(num_pages)
             canvas.Canvas.showPage(self)
         canvas.Canvas.save(self)
 
     def draw_page_number(self, page_count):
         self.setFont("Helvetica", 9)
         self.drawRightString(A4[0] - 20, 20, f"Page {self._pageNumber} of {page_count}")
+
 
 def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selected_ui_options):
     results = results[results['Lake_ID'].isin(lake_ids)].copy()
@@ -432,25 +431,41 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
 
     # --- AI Comparison Page with Overflow Handling ---
     c.bookmarkPage('ai_comparison')
-    draw_paragraph(c, "AI-Powered Detailed Comparison", title_style, 40, A4[1] - 50, A4[0] - 80, 100)
     ai_prompt = build_detailed_ai_prompt(results, calc_details, tuple(lake_ids))
     ai_narrative = generate_ai_insight(ai_prompt).replace('\n', '<br/>')
     
+    # FIX: Robust logic to handle long text overflowing the page using paragraph.split
     story = [Paragraph(ai_narrative, justified_style)]
-    page_top_margin = 120; page_bottom_margin = 60
+    page_top_margin = 80; page_bottom_margin = 60
     page_width = A4[0] - 80; x_pos = 40
     y_cursor = A4[1] - page_top_margin
-    
+
+    # Draw the title on the first page of this section
+    y_cursor -= draw_paragraph(c, "AI-Powered Detailed Comparison", title_style, 40, y_cursor, page_width, 100)
+    y_cursor -= 15 # Add some space
+
+    available_height = y_cursor - page_bottom_margin
+
     while story:
         p = story.pop(0)
-        w, h = p.wrapOn(c, page_width, y_cursor)
-        if h < (y_cursor - page_bottom_margin):
-            p.drawOn(c, x_pos, y_cursor - h)
-            y_cursor -= h
-        else:
-            story.insert(0, p)
-            c.showPage()
-            y_cursor = A4[1] - page_top_margin
+        frags = p.split(page_width, available_height)
+        
+        if len(frags) < 2 and frags: # It fits completely on the current page
+            frags[0].wrapOn(c, page_width, available_height)
+            frags[0].drawOn(c, x_pos, y_cursor - frags[0].height)
+        else: # It doesn't fit, split it
+            # Draw the part that fits
+            if frags:
+                frags[0].wrapOn(c, page_width, available_height)
+                frags[0].drawOn(c, x_pos, y_cursor - frags[0].height)
+            
+            # Put the rest back in the story for the next page
+            for frag in frags[1:]:
+                story.insert(0, frag)
+            
+            c.showPage() # Create a new page
+            y_cursor = A4[1] - page_top_margin # Reset y_cursor for new page
+            available_height = y_cursor - page_bottom_margin
     c.showPage()
     
     # --- Breakdown Page ---
@@ -536,8 +551,6 @@ with col1:
             if st.form_submit_button("Set Parameters", use_container_width=True):
                 st.session_state.confirmed_parameters = [p for p, selected in temp_selections.items() if selected]
                 st.session_state.pop('analysis_complete', None)
-                st.session_state.pop('analysis_results', None)
-                st.session_state.pop('pdf_buffer', None)
                 st.rerun()
 
         if st.session_state.confirmed_parameters:
@@ -597,7 +610,6 @@ with col2:
                     try:
                         selected_df = df_health_full[df_health_full["Lake_ID"].isin(valid_lakes)].copy()
                         
-                        # Pass tuple of lake IDs to ensure correct caching
                         results, calc_details = calculate_lake_health_score(
                             selected_df, 
                             st.session_state.confirmed_parameters,
