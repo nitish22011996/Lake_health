@@ -20,6 +20,7 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.utils import ImageReader
 from reportlab.lib import colors
+# FIX: Import the 'Image' flowable, which was missing.
 from reportlab.platypus import Paragraph, Table, TableStyle, Frame, PageTemplate, BaseDocTemplate, Image
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from matplotlib.ticker import MaxNLocator
@@ -345,7 +346,6 @@ def generate_ai_insight(prompt):
 
 # --- PDF GENERATION USING REPORTLAB'S BaseDocTemplate FOR ROBUST PAGE NUMBERING ---
 def _page_number_handler(canvas, doc):
-    """Global handler for drawing the page number on each page."""
     canvas.saveState()
     canvas.setFont('Helvetica', 9)
     page_count = getattr(doc, 'page_count', 0)
@@ -440,19 +440,28 @@ def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selecte
         story.append(Paragraph(ai_narrative, justified_style))
         
     # --- Build the PDF using the robust two-pass method ---
+    class MyDocTemplate(BaseDocTemplate):
+        def __init__(self, filename, **kw):
+            self.allowSplitting = 0
+            BaseDocTemplate.__init__(self, filename, **kw)
+            template = PageTemplate(id='main', frames=[Frame(self.leftMargin, self.bottomMargin, self.width, self.height)], onPage=_page_number_handler)
+            self.addPageTemplates([template])
+        
+        def afterFlowable(self, flowable):
+            "Registers a bookmark for each header."
+            if flowable.__class__ is Paragraph and flowable.style.name in ['h1', 'h2', 'h3']:
+                text = flowable.getPlainText()
+                level = {'h1': 0, 'h2': 1, 'h3': 2}.get(flowable.style.name, 0)
+                self.canv.bookmarkPage(text)
+                self.canv.addOutlineEntry(text, text, level, 0)
+
     # Pass 1: Build on a dummy buffer to count pages
-    doc_count = BaseDocTemplate(BytesIO(), pagesize=A4)
-    frame = Frame(doc_count.leftMargin, doc_count.bottomMargin, doc_count.width, doc_count.height, id='normal')
-    template = PageTemplate(id='main_count', frames=[frame])
-    doc_count.addPageTemplates([template])
-    doc_count.build(story)
-    total_pages = doc_count.page
+    doc_for_count = MyDocTemplate(BytesIO())
+    doc_for_count.build(story)
+    total_pages = doc_for_count.page
 
     # Pass 2: Build the final PDF with the correct total page count
-    doc = BaseDocTemplate(buffer, pagesize=A4)
-    frame = Frame(doc.leftMargin, doc.bottomMargin, doc.width, doc.height, id='normal')
-    template = PageTemplate(id='main', frames=[frame], onPage=_page_number_handler)
-    doc.addPageTemplates([template])
+    doc = MyDocTemplate(buffer)
     setattr(doc, 'page_count', total_pages) # Attach the total page count
     doc.build(story)
     
