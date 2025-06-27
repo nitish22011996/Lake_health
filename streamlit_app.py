@@ -667,15 +667,43 @@ def _draw_report_content(c, bookmark_locations=None):
         if i % 2 == 0 and i + 1 < len(plots): c.line(40, A4[1]*0.5 - 40, A4[0] - 40, A4[1]*0.5 - 40)
     c.showPage()
 
-    # --- Case Study Page ---
+   # PASTE THIS ENTIRE NEW BLOCK IN ITS PLACE:
+
+    # --- Case Study and New Individual Trajectory Pages ---
+    # This part replaces the old "Case Study" section to integrate the new plots
+
+    # First, add the new section for the Self-Normalized plots to the Table of Contents
+    bookmark_locations['self_norm_plots'] = c.getPageNumber()
+    c.bookmarkPage("self_norm_plots")
+    c.addOutlineEntry("Self-Normalized Trajectories", "self_norm_plots", level=0, closed=False)
+
+    # Generate and draw the self-normalized plots (this function returns a list of images)
+    self_norm_plots = plot_self_normalized_evolution(df, tuple(selected_ui_options), tuple(lake_ids))
+    for i, (title, buf, _) in enumerate(self_norm_plots):
+        if i > 0 and i % 2 == 0: c.showPage()
+        y_pos = A4[1] - 50 if i % 2 == 0 else A4[1] * 0.5 - 60
+        img_y_pos = A4[1] * 0.5 - 20 if i % 2 == 0 else 20
+        c.setFont("Helvetica-Bold", 14); c.drawCentredString(A4[0] / 2, y_pos, title)
+        c.drawImage(ImageReader(buf), 40, img_y_pos, width=A4[0] - 80, height=A4[1] * 0.45 - 40, preserveAspectRatio=True)
+        if i % 2 == 0 and i + 1 < len(self_norm_plots): c.line(40, A4[1]*0.5 - 40, A4[0] - 40, A4[1]*0.5 - 40)
+    c.showPage()
+
+    # Now, define and draw the main case study figures using the NEW plot functions
     bookmark_locations['case_study'] = c.getPageNumber()
     c.bookmarkPage('case_study')
+    c.addOutlineEntry("Comparative Case Study", "case_study", level=0, closed=False)
+
     case_study_figures = [
-        plot_radar_chart(calc_details, tuple(lake_ids)), 
-        plot_health_score_evolution(df, selected_ui_options, tuple(lake_ids)), 
-        plot_holistic_trajectory_matrix(df, results, selected_ui_options, tuple(lake_ids)), 
-        plot_hdi_vs_health_correlation(results, tuple(lake_ids)) # Restored this figure
+        plot_radar_chart(calc_details, tuple(lake_ids)),
+        # Use the NEW globally normalized evolution plot
+        plot_health_score_evolution_globally_normalized(df, tuple(selected_ui_options), tuple(lake_ids)),
+        # Use the NEW normalized holistic trajectory plot
+        plot_holistic_trajectory_matrix_normalized(df, results, tuple(selected_ui_options), tuple(lake_ids)),
+        # Keep the HDI plot
+        plot_hdi_vs_health_correlation(results, tuple(lake_ids))
     ]
+
+    # The rest of this loop remains the same
     for i, fig_data in enumerate(case_study_figures):
         if fig_data is None or fig_data[1] is None: continue
         if i > 0 : c.showPage()
@@ -687,7 +715,7 @@ def _draw_report_content(c, bookmark_locations=None):
         ai_prompt = build_figure_specific_ai_prompt(title, f"Analysis of lakes {lake_ids}.")
         ai_narrative = generate_ai_insight(ai_prompt).replace('\n', '<br/>')
         draw_paragraph(ai_narrative, justified_style, 40, y_cursor, A4[0]-80, A4[1]*0.4 - 40)
-    c.showPage() # FIX: Add this to ensure the last page is saved
+    c.showPage()
 
 def generate_comparative_pdf_report(df, results, calc_details, lake_ids, selected_ui_options):
     buffer = BytesIO()
