@@ -412,11 +412,13 @@ def plot_self_normalized_evolution(_df, confirmed_params, lake_ids_tuple, start_
         image_list.append((f"Self-Normalized Journey: Lake {lake_id}", buf, True)) # Mark as grouped
     return image_list
 
+# REPLACE the existing 'plot_holistic_trajectory_matrix_normalized' with this complete, corrected version:
+
 @st.cache_data
 def plot_holistic_trajectory_matrix_normalized(_df, _results, confirmed_params, lake_ids_tuple, start_year=2010):
     """
-    (NEW FOR STREAMLIT)
-    Generates a normalized holistic trajectory matrix.
+    (CORRECTED FOR STREAMLIT)
+    Generates a normalized holistic trajectory matrix with quadrant labels.
     """
     historical_scores = calculate_historical_scores(_df, confirmed_params, lake_ids_tuple)
     if historical_scores.empty: return None, None, None
@@ -435,12 +437,28 @@ def plot_holistic_trajectory_matrix_normalized(_df, _results, confirmed_params, 
     fig, ax = plt.subplots(figsize=(10, 8), dpi=150)
     sns.scatterplot(data=plot_df, x='Normalized Status', y='Recent Trend', hue=plot_df.index.astype(str), s=150, palette='viridis', legend=False, ax=ax)
     for i, row in plot_df.iterrows(): ax.text(row['Normalized Status'] + 0.01, row['Recent Trend'], f"Lake {i}", fontsize=9)
+    
     avg_norm_score = plot_df['Normalized Status'].mean()
     ax.axhline(0, ls='--', color='gray'); ax.axvline(avg_norm_score, ls='--', color='gray')
     ax.set_title(f'Recent Holistic Lake Trajectory ({start_year}-Present)', fontsize=16, pad=20)
     ax.set_xlabel('Latest Normalized Health Score (Status)', fontsize=12)
     ax.set_ylabel(f'Recent Health Score Trend (Slope, {start_year}-Present)', fontsize=12)
-    plt.tight_layout(); buf = BytesIO(); plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.3); plt.close(fig)
+    
+    # --- THIS IS THE MISSING PART THAT HAS BEEN ADDED BACK ---
+    # Get the y-axis limits to place the text correctly at the top and bottom
+    y_lim_bottom, y_lim_top = ax.get_ylim()
+
+    # Add the quadrant labels
+    plt.text(avg_norm_score + 0.01, y_lim_top, 'Healthy & Resilient', ha='left', va='top', color='green', alpha=0.7, fontsize=12)
+    plt.text(avg_norm_score + 0.01, y_lim_bottom, 'Healthy but Vulnerable', ha='left', va='bottom', color='orange', alpha=0.7, fontsize=12)
+    plt.text(avg_norm_score - 0.01, y_lim_top, 'In Recovery', ha='right', va='top', color='blue', alpha=0.7, fontsize=12)
+    plt.text(avg_norm_score - 0.01, y_lim_bottom, 'Critical Condition', ha='right', va='bottom', color='red', alpha=0.7, fontsize=12)
+    # --- END OF ADDED PART ---
+
+    plt.tight_layout(); 
+    buf = BytesIO(); 
+    plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.3); 
+    plt.close(fig)
     return f"Figure 3: Holistic Trajectory ({start_year}-Present)", buf, False
 
 @st.cache_data
