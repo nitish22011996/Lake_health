@@ -498,11 +498,19 @@ def build_detailed_ai_prompt(results, calc_details, lake_ids_tuple):
 
 @st.cache_data
 def build_figure_specific_ai_prompt(figure_title, data_summary):
-    prompt = f"You are an environmental data analyst interpreting a figure for a report. The figure is titled '{figure_title}'. Below is a summary of the data used to create this figure.\n\n"
-    prompt += "### Data Summary:\n" + data_summary + "\n\n"
-    prompt += ("### Your Task:\nWrite a concise, insightful paragraph (3-5 sentences) that interprets this figure. "
-               "Explain what the visual pattern reveals about the lakes being compared. Do not just list the data; "
-               "provide a high-level interpretation of the findings shown in the chart.")
+    prompt = (
+        f"You are an environmental data analyst preparing figure interpretations for a journal article. "
+        f"The figure is titled: '{figure_title}'.\n\n"
+        f"### Data Summary:\n{data_summary}\n\n"
+        "### Your Task:\n"
+        "Write a concise but insightful academic interpretation (4–6 sentences). "
+        "Do not simply restate the data. Instead:\n"
+        "- Highlight how different lakes perform across the parameters shown.\n"
+        "- Compare lakes, noting balanced versus skewed patterns, and strong versus weak parameters.\n"
+        "- Point out any temporal or spatial trends, such as recovery, decline, or stability.\n"
+        "- Discuss what these patterns reveal about ecological stress, resilience, or socio-ecological interactions.\n"
+        "- Maintain an academic tone suitable for a journal report, focusing on what the figure teaches us about comparative lake health."
+    )
     return prompt
 
 @st.cache_data
