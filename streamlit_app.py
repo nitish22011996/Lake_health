@@ -519,7 +519,8 @@ def generate_ai_insight(prompt):
     if not API_KEY: return "Error: API Key not found. Please configure it in Streamlit secrets."
     API_URL = "https://openrouter.ai/api/v1/chat/completions"
     headers = {"Authorization": f"Bearer {API_KEY}"}
-    data = {"model": "deepseek/deepseek-chat-v3.1:free", "messages": [{"role": "user", "content": prompt}]}
+    data = {"model": "", "messages": [{"role": "user", "content": prompt}]}
+    # deepseek/deepseek-chat-v3.1:free
     try:
         response = requests.post(API_URL, json=data, headers=headers, timeout=90)
         response.raise_for_status()
