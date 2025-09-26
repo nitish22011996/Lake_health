@@ -327,7 +327,7 @@ def plot_radar_chart(calc_details, lake_ids_tuple):
 # --- ADD THESE THREE FUNCTIONS TO YOUR SCRIPT ---
 
 @st.cache_data
-def plot_health_score_evolution_globally_normalized(_df, confirmed_params, lake_ids_tuple, start_year=2010):
+def plot_health_score_evolution_globally_normalized(_df, confirmed_params, lake_ids_tuple, start_year=2005):
     """
     (NEW FOR STREAMLIT)
     Generates a multi-panel plot showing the health score evolution for several lakes
@@ -374,7 +374,7 @@ def plot_health_score_evolution_globally_normalized(_df, confirmed_params, lake_
     return f"Figure 2: Globally Normalized Health ({start_year}-Present)", buf, False
 
 @st.cache_data
-def plot_self_normalized_evolution(_df, confirmed_params, lake_ids_tuple, start_year=2010):
+def plot_self_normalized_evolution(_df, confirmed_params, lake_ids_tuple, start_year=2005):
     """
     (NEW FOR STREAMLIT)
     Generates individual plots for each lake's self-normalized journey.
@@ -415,7 +415,7 @@ def plot_self_normalized_evolution(_df, confirmed_params, lake_ids_tuple, start_
 # REPLACE the existing 'plot_holistic_trajectory_matrix_normalized' with this complete, corrected version:
 
 @st.cache_data
-def plot_holistic_trajectory_matrix_normalized(_df, _results, confirmed_params, lake_ids_tuple, start_year=2010):
+def plot_holistic_trajectory_matrix_normalized(_df, _results, confirmed_params, lake_ids_tuple, start_year=2005):
     """
     (CORRECTED FOR STREAMLIT)
     Generates a normalized holistic trajectory matrix with quadrant labels.
